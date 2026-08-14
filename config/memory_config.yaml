@@ -1,0 +1,30 @@
+# Memory 配置文件
+
+# 短期记忆（会话级）
+short_term_memory:
+  max_history_length: 10
+  enable_summary: true
+
+# 对话记忆（ChromaDB 向量库，支持跨会话语义检索）
+conversation_memory:
+  enabled: true
+  recall_top_k: 3
+
+# 用户画像（LLM 自动提取，存 SQLite）
+user_profile:
+  enabled: true
+  extraction_interval: 10
+
+# 演进式摘要（LLM 自动更新，存 SQLite）
+summary:
+  enabled: true
+  update_interval: 10
+  keep_recent: 20
+
+long_term_memory:
+  enabled: true
+  db_path: ./data/sqlite/memory.db
+  max_topics_per_user: 20
+  topic_expiry_days: 30
+
+memory_topics: []

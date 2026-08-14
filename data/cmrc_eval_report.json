@@ -1,0 +1,42 @@
+{
+  "纯向量检索 (Vector)": {
+    "Hit Rate@1": 0.63,
+    "Hit Rate@3": 0.642,
+    "Hit Rate@5": 0.812,
+    "MRR": 0.6888,
+    "NDCG@5": 0.7149,
+    "NDCG@10": 0.7625,
+    "P50延迟(ms)": 4.9,
+    "P99延迟(ms)": 7.7
+  },
+  "混合检索 (BM25+Vector, RRF)": {
+    "Hit Rate@1": 0.652,
+    "Hit Rate@3": 0.672,
+    "Hit Rate@5": 0.834,
+    "MRR": 0.7125,
+    "NDCG@5": 0.7391,
+    "NDCG@10": 0.7833,
+    "P50延迟(ms)": 5.0,
+    "P99延迟(ms)": 9.1
+  },
+  "混合+Cross-Encoder精排": {
+    "Hit Rate@1": 0.924,
+    "Hit Rate@3": 0.924,
+    "Hit Rate@5": 0.928,
+    "MRR": 0.9248,
+    "NDCG@5": 0.9257,
+    "NDCG@10": 0.9257,
+    "P50延迟(ms)": 914.0,
+    "P99延迟(ms)": 1463.5
+  },
+  "_meta": {
+    "dataset": "clue/cmrc2018 (validation)",
+    "num_queries": 500,
+    "num_docs": 686,
+    "chunk_size": 500,
+    "chunk_overlap": 100,
+    "embedding_model": "BAAI/bge-small-zh-v1.5",
+    "reranker_model": "BAAI/bge-reranker-base",
+    "gt_retention_rate": 1.0
+  }
+}

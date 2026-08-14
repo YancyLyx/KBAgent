@@ -1,0 +1,33 @@
+{
+  "纯向量检索": {
+    "HR@1": 0.8208955223880597,
+    "HR@3": 0.9402985074626866,
+    "HR@5": 0.9701492537313433,
+    "HR@10": 0.9701492537313433,
+    "MRR": 0.8798507462686568
+  },
+  "混合检索 (BM25+向量+RRF)": {
+    "HR@1": 0.8507462686567164,
+    "HR@3": 0.9402985074626866,
+    "HR@5": 0.9552238805970149,
+    "HR@10": 0.9701492537313433,
+    "MRR": 0.89863184079602
+  },
+  "混合+RRF+Cross-Encoder精排": {
+    "HR@1": 0.8656716417910447,
+    "HR@3": 0.9253731343283582,
+    "HR@5": 0.9253731343283582,
+    "HR@10": 0.9253731343283582,
+    "MRR": 0.8955223880597015
+  },
+  "_meta": {
+    "doc_count": 10,
+    "parent_chunk_count": 90,
+    "child_chunk_count": 336,
+    "query_count": 67,
+    "gt_retention_rate": 0.9701492537313433,
+    "embedding_model": "BAAI/bge-small-zh-v1.5",
+    "reranker_model": "BAAI/bge-reranker-base",
+    "chunker": "MarkdownChunker (semantic blocks, chunk_size=1000) -> ParentChildChunkerSimple (child_size=300, overlap=30)"
+  }
+}
