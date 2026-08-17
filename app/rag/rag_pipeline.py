@@ -6,6 +6,7 @@
 
 from typing import List, Dict, Any, Optional
 import os
+import yaml
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
@@ -51,6 +52,17 @@ class RAGPipeline:
         self.vector_store = VectorStore(collection_name, config_path)
         self.retriever = Retriever(self.vector_store, config_path)
         self.reranker = Reranker(config_path)
+        # Autocut 配置：检索策略里默认开关与落差阈值（retrieve 的 autocut 参数
+        # 为 None 时读这里；显式传 True/False 可覆盖）
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                _cfg = yaml.safe_load(f) or {}
+            _retrieval = _cfg.get("retrieval_strategy", {})
+            self.autocut_enabled = bool(_retrieval.get("autocut", False))
+            self.autocut_drop_ratio = float(_retrieval.get("autocut_drop_ratio", 0.3))
+        except Exception:
+            self.autocut_enabled = False
+            self.autocut_drop_ratio = 0.3
 
     def add_documents(self, documents: List[Dict[str, Any]]) -> None:
         """
@@ -74,6 +86,7 @@ class RAGPipeline:
         tag: Optional[str] = None,
         diversity_rerank: bool = False,
         min_rerank_score: Optional[float] = None,
+        autocut: Optional[bool] = None,
     ) -> List[Dict[str, Any]]:
         """
         检索相关文档
@@ -86,6 +99,7 @@ class RAGPipeline:
             top_k: 返回结果数量
             use_rerank: 是否使用重排序
             tag: 知识库标签，只检索该分类下的文档。None 时不限分类
+            autocut: 是否启用分数悬崖动态截断（None 读配置，默认关）
 
         Returns:
             检索结果列表
@@ -104,7 +118,15 @@ class RAGPipeline:
         
         # 重排序（在父块级别）
         reranked_results = self.reranker.rerank(
-            query, results, top_k=top_k, threshold=min_rerank_score
+            query,
+            results,
+            top_k=top_k,
+            threshold=min_rerank_score,
+            autocut=(
+                getattr(self, "autocut_enabled", False)
+                if autocut is None else autocut
+            ),
+            drop_ratio=getattr(self, "autocut_drop_ratio", 0.3),
         )
         if diversity_rerank and len(reranked_results) > 1:
             # MMR 去冗余：相关性 + 多样性平衡，避免 top-k 语义重复

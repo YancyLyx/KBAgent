@@ -28,9 +28,18 @@ def check_and_alert(
     completeness: int,
     usefulness: int,
     explanation: str = "",
+    memory_context: str = "",
+    faithfulness: Optional[int] = None,
 ) -> bool:
     """检查评分是否低于阈值，若低于则记录告警。返回是否触发了告警。"""
-    if usefulness >= THRESHOLDS["usefulness"] and relevance >= THRESHOLDS["relevance"]:
+    low_faithfulness = (
+        faithfulness is not None and faithfulness < THRESHOLDS["usefulness"]
+    )
+    if (
+        usefulness >= THRESHOLDS["usefulness"]
+        and relevance >= THRESHOLDS["relevance"]
+        and not low_faithfulness
+    ):
         return False
 
     # 读-改-写加锁：避免并发请求交错写坏 JSON
@@ -42,6 +51,8 @@ def check_and_alert(
             "scores": {"relevance": relevance, "completeness": completeness, "usefulness": usefulness},
             "thresholds": THRESHOLDS,
             "explanation": explanation,
+            "memory_context": memory_context[:300],
+            "faithfulness": faithfulness,
             "timestamp": datetime.now().isoformat(),
         })
         alerts = alerts[-200:]  # 保留最近 200 条

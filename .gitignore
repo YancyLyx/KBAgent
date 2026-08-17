@@ -99,6 +99,7 @@ temp_writer.py
 data/eval_alerts.json
 data/eval_results.json
 data/realtime_scores.json
+data/missed_queries.jsonl
 .pytest_cache/
 
 doc/interview_prep.md

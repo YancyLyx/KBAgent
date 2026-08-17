@@ -37,8 +37,14 @@ def record_request(
     input_chars: int = 0,
     output_chars: int = 0,
     alert: bool = False,
+    tool_calls: int = 0,
+    tool_failures: int = 0,
 ) -> None:
-    """记录一条请求埋点"""
+    """记录一条请求埋点
+
+    tool_calls：本轮 ReAct 中进入执行分支的工具调用数（含失败）；
+    tool_failures：其中执行抛异常的数量（工具侧真实失败）。
+    """
     entry = {
         "timestamp": datetime.now().isoformat(),
         "query": query[:200],
@@ -48,6 +54,8 @@ def record_request(
         "input_tokens_est": _estimate_tokens(query) + input_chars // 3,
         "output_tokens_est": output_chars // 3,
         "alert": alert,
+        "tool_calls": tool_calls,
+        "tool_failures": tool_failures,
     }
     os.makedirs(os.path.dirname(METRICS_PATH), exist_ok=True)
     with open(METRICS_PATH, "a", encoding="utf-8") as f:
@@ -84,6 +92,8 @@ def summary() -> dict:
     latencies = [m["latency_ms"] for m in metrics]
     cached = sum(1 for m in metrics if m.get("cached"))
     errors = sum(1 for m in metrics if m.get("error"))
+    total_tool_calls = sum(m.get("tool_calls", 0) for m in metrics)
+    total_tool_failures = sum(m.get("tool_failures", 0) for m in metrics)
 
     return {
         "total": len(metrics),
@@ -92,6 +102,11 @@ def summary() -> dict:
         "p95_ms": round(float(np.percentile(latencies, 95)), 1),
         "cache_hit_rate": round(cached / len(metrics), 3),
         "error_rate": round(errors / len(metrics), 3),
+        "tool_success_rate": (
+            round(1 - total_tool_failures / total_tool_calls, 3)
+            if total_tool_calls else None
+        ),
+        "tool_calls_total": total_tool_calls,
         "total_input_tokens_est": sum(m.get("input_tokens_est", 0) for m in metrics),
         "total_output_tokens_est": sum(m.get("output_tokens_est", 0) for m in metrics),
     }

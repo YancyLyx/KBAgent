@@ -45,6 +45,8 @@ class Reranker:
         documents: List[Dict[str, Any]],
         top_k: int = 3,
         threshold: Optional[float] = None,
+        autocut: bool = False,
+        drop_ratio: float = 0.3,
     ) -> List[Dict[str, Any]]:
         """
         对检索结果进行重排序
@@ -54,6 +56,10 @@ class Reranker:
             documents: 待排序文档列表
             top_k: 返回前 k 个结果
             threshold: 相关性阈值，低于阈值的文档被剔除（None 不启用）
+            autocut: 是否启用"分数悬崖"动态截断——重排后相邻文档分数相对落差
+                超过 drop_ratio 时，在落差处截断（替代固定 top_k 的噪声注入）
+            drop_ratio: 相对落差阈值（如 0.3 = 后一名分数比前一名低 30% 以上
+                视为断层，断层之后的内容大概率是噪声/弱相关）
 
         Returns:
             重排序后的文档列表
@@ -87,6 +93,23 @@ class Reranker:
                 d for d in sorted_docs
                 if d["rerank_score"] >= threshold
             ]
+
+        # 分数悬崖动态截断：找最大相对落差处截断（至少保留 1 条）
+        if autocut and len(sorted_docs) > 1:
+            scores = [float(d.get("rerank_score", 0.0)) for d in sorted_docs]
+            max_drop = 0.0
+            cut_idx = None
+            for i in range(1, len(scores)):
+                prev = scores[i - 1]
+                cur = scores[i]
+                if prev <= 0:
+                    break
+                rel_drop = (prev - cur) / prev
+                if rel_drop > max_drop:
+                    max_drop = rel_drop
+                    cut_idx = i
+            if cut_idx is not None and max_drop >= drop_ratio:
+                sorted_docs = sorted_docs[:cut_idx]
 
         return sorted_docs[:top_k]
 

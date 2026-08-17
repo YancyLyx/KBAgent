@@ -58,6 +58,8 @@ def test_pipeline_passes_threshold():
 
     pipe = RAGPipeline.__new__(RAGPipeline)
     pipe.reranker = _reranker_with_scores([0.9, 0.2])
+    pipe.autocut_enabled = False
+    pipe.autocut_drop_ratio = 0.3
     pipe.retriever = SimpleNamespace(
         parent_child_search=lambda *a, **k: [
             {"content": "A", "id": "1"},

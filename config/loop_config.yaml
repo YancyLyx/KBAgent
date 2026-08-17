@@ -1,0 +1,60 @@
+# Agent 循环与上下文预算配置
+#
+# 设计原则：
+# 1. 轮数上限是"预算保护"，不是"路径规划"——业务上多数任务 2-3 轮收敛，
+#    上限只负责兜底；真正的终止靠 LLM 直接回答 + 无进展检测 + 上限三层。
+# 2. 工具结果上限由"上下文预算公式"动态计算（窗口 − 系统提示 − 历史 −
+#    输出预留 − 安全余量），配置里的 tool_result_max_chars 只是 clamp 上限，
+#    不是拍脑袋的固定截断值。
+# 3. 无进展检测与指纹防循环互补：指纹防"同工具同参数"，无进展检测防
+#    "换了参数但结果一样"（检索命中的文档集合重复）。
+
+loop:
+  # ReAct 循环轮数上限
+  max_rounds: 5
+  # 连续多少次"结果与上一轮基本相同"判定为无进展（≥2 时强制 LLM 直接回答）
+  no_progress_threshold: 2
+
+budget:
+  # 模型上下文窗口（DeepSeek deepseek-chat 官方 64K；deepseek-reasoner 128K）
+  model_window_tokens: 64000
+  # 工具结果截断的 clamp 上限（动态预算算出来也不会超过它）
+  tool_result_max_chars: 3000
+  # 动态预算的下限（上下文占用很高时也不能低于它，保证工具结果可用）
+  tool_result_min_chars: 500
+  # 每轮 LLM 输出预留（max_tokens 1000 × 预估轮数余量）
+  output_reserve_tokens: 2000
+  # 安全余量（模型窗口官方值与实际可用值之间的保守差额）
+  safety_margin_tokens: 4000
+  # 中文字符 → token 估算口径（1 字符 ≈ 1 token，英文按 4 字符 ≈ 1 token）
+  chars_per_token: 1.0
+  # 演进式摘要注入截断
+  summary_max_chars: 300
+  # 历史回忆片段截断
+  recall_max_chars: 200
+
+# 各阶段 LLM 输出 token 上限（统一收口，避免散落代码常量）
+llm_tokens:
+  react_loop: 1000       # ReAct 循环每轮输出上限
+  summary: 400           # 演进式摘要 + 画像提取
+  fallback: 500          # 低分兜底重答
+  self_rag_judge: 150    # Self-RAG 检索充分性判断
+  recall_rewrite: 100    # 指代查询改写
+
+# Self-RAG：检索后 LLM 判断"片段是否足够回答"，不足则改写查询再检一次
+# 默认关闭：每次检索多一次 LLM 调用，按需开启（Advanced RAG 增强的统一策略）
+self_rag:
+  enabled: false
+  max_rounds: 1  # 最多补检几次
+
+# 多查询分解 + HyDE 增强检索的触发阈值（与 _should_expand_query 对齐）
+query_expansion:
+  max_chars_trigger: 25
+
+# 兜底场景标签（检索不到时的生成层边界）：
+# - strict_tags：检索不到时明确告知未找到，不得用模型知识编造（默认严格）
+# - lenient_tags：允许用通用知识兜底但必须标注「以下为通用知识…」
+# 未列出的 tag 默认按 strict 处理（企业知识库内容不可编造）
+fallback_policy:
+  strict_tags: ["薪酬绩效", "股权激励", "福利保险", "生育假期", "差旅报销", "文献"]
+  lenient_tags: []

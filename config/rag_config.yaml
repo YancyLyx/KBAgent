@@ -18,6 +18,11 @@ retrieval_strategy:
   keyword_top_k: 10
   rerank_top_k: 3
   score_threshold: 0.5
+  # Autocut 分数悬崖动态截断：重排后相邻文档相对落差超过 drop_ratio 时
+  # 在落差处截断，替代"固定 top_k 全收"的噪声注入。默认关（与 Advanced RAG
+  # 增强统一策略），评测对比后再决定是否默认开启。
+  autocut: false
+  autocut_drop_ratio: 0.3
 
 embedding:
   model_name: BAAI/bge-small-zh

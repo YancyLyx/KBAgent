@@ -64,7 +64,7 @@ class EvalRunner:
         if total == 0:
             return EvalReport(
                 total_samples=0, avg_relevance=0.0, avg_completeness=0.0,
-                avg_usefulness=0.0, avg_total=0.0, samples=[],
+                avg_usefulness=0.0, avg_faithfulness=None, avg_total=0.0, samples=[],
                 run_id=f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
                 created_at=datetime.now().isoformat(),
             )
@@ -72,12 +72,15 @@ class EvalRunner:
         avg_rel = sum(s.relevance for s in scores) / total
         avg_com = sum(s.completeness for s in scores) / total
         avg_use = sum(s.usefulness for s in scores) / total
+        faith_scores = [s.faithfulness for s in scores if s.faithfulness is not None]
+        avg_faith = round(sum(faith_scores) / len(faith_scores), 2) if faith_scores else None
 
         return EvalReport(
             total_samples=total,
             avg_relevance=round(avg_rel, 2),
             avg_completeness=round(avg_com, 2),
             avg_usefulness=round(avg_use, 2),
+            avg_faithfulness=avg_faith,
             avg_total=round((avg_rel + avg_com + avg_use) / 3, 2),
             samples=scores,
             run_id=f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}",

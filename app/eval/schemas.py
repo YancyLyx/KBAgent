@@ -12,6 +12,7 @@ class EvalScore(BaseModel):
     relevance: int       # 相关性 1-5
     completeness: int    # 完整性 1-5
     usefulness: int      # 有用性 1-5
+    faithfulness: Optional[int] = None  # 忠实度 1-5（答案是否基于检索资料，无编造）
     explanation: str     # 评分说明
     timestamp: str
 
@@ -22,6 +23,7 @@ class EvalReport(BaseModel):
     avg_relevance: float
     avg_completeness: float
     avg_usefulness: float
+    avg_faithfulness: Optional[float] = None
     avg_total: float
     samples: List[EvalScore]
     run_id: str

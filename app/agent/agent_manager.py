@@ -19,6 +19,7 @@ import time
 from types import SimpleNamespace
 from typing import Dict, Any, Optional
 from enum import Enum
+from pathlib import Path
 
 from ..rag.rag_pipeline import RAGPipeline
 from ..rag.vector_store import VectorStore
@@ -53,7 +54,13 @@ class AgentManager:
 1. 如果用户问题需要检索知识库，请使用 read_category_info 了解各知识库内容范围
 2. 明确知识库后使用 search_knowledge_base 检索相关文档
 3. 基于检索结果组织回答
-4. 如果用户问题不需要检索知识库，直接回答"""
+4. 如果用户问题不需要检索知识库，直接回答
+
+回答原则（兜底边界）：
+{fallback_rule}
+- 严格基于知识库检索结果回答；引用具体数据/条款时尽量标注来源章节。
+- 如果检索结果提示未找到相关内容，明确告知用户未找到，并引导换关键词或补充细节，不要编造答案。
+- 通用常识问题（不属于任何知识库分类）可以基于通用知识回答，但需标注「以下为通用知识，并非企业知识库内容」。"""
 
     def __init__(
         self,
@@ -89,11 +96,86 @@ class AgentManager:
         # 会话累计轮数（区别于 ShortMemory.get_turn_count：后者是窗口内剩余轮数，
         # 窗口填满后恒为 max_history_length，不能作为摘要触发依据）
         self._session_turn_count = 0
+        # Agent 循环与上下文预算（Loop Engineering）
+        # 轮数上限是"预算保护"不是"路径规划"；工具结果上限按上下文预算动态算
+        self.loop_config = self._load_loop_config()
+        _loop_cfg = self.loop_config.get("loop", {})
+        _budget_cfg = self.loop_config.get("budget", {})
+        self.max_loop_rounds = int(_loop_cfg.get("max_rounds", 5))
+        self.no_progress_threshold = int(_loop_cfg.get("no_progress_threshold", 2))
+        self.tool_result_max_chars = int(_budget_cfg.get("tool_result_max_chars", 3000))
+        self.tool_result_min_chars = int(_budget_cfg.get("tool_result_min_chars", 500))
+        self.summary_max_chars = int(_budget_cfg.get("summary_max_chars", 300))
+        self.recall_max_chars = int(_budget_cfg.get("recall_max_chars", 200))
+        self.budget_config = dict(_budget_cfg)
+        self.llm_tokens = {
+            "react_loop": int(self.loop_config.get("llm_tokens", {}).get("react_loop", 1000)),
+            "summary": int(self.loop_config.get("llm_tokens", {}).get("summary", 400)),
+            "fallback": int(self.loop_config.get("llm_tokens", {}).get("fallback", 500)),
+            "self_rag_judge": int(
+                self.loop_config.get("llm_tokens", {}).get("self_rag_judge", 150)
+            ),
+            "recall_rewrite": int(
+                self.loop_config.get("llm_tokens", {}).get("recall_rewrite", 100)
+            ),
+        }
+        self.self_rag_enabled = bool(
+            self.loop_config.get("self_rag", {}).get("enabled", False)
+        )
+        self.self_rag_max_rounds = int(
+            self.loop_config.get("self_rag", {}).get("max_rounds", 1)
+        )
+        # 兜底场景标签（第二篇文章：strict 拒绝编造 / lenient 允许通用知识兜底）
+        _fallback = self.loop_config.get("fallback_policy", {})
+        self.strict_tags = [
+            str(t) for t in _fallback.get("strict_tags", [])
+        ]
+        self.lenient_tags = [
+            str(t) for t in _fallback.get("lenient_tags", [])
+        ]
         self.conversation_memory = (
             ConversationMemory(self.vector_store)
             if enable_memory and self.vector_store
             else None
         )
+
+    @staticmethod
+    def _load_loop_config(config_path: str = "config/loop_config.yaml") -> dict:
+        """加载 Agent 循环/预算配置；缺失或损坏时回退默认值（不阻断启动）"""
+        try:
+            import yaml
+            path = Path(__file__).resolve().parent.parent.parent / config_path
+            if not path.exists():
+                return {}
+            with open(path, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
+        except Exception:
+            return {}
+
+    def _build_fallback_rule(self) -> str:
+        """生成兜底场景规则（注入 system prompt）：
+        strict 场景（制度/财务/合规）检索不到时明确拒绝编造；
+        lenient 场景允许用通用知识兜底但必须标注来源。
+        """
+        lines = []
+        if self.strict_tags:
+            lines.append(
+                "- 以下分类属于严格场景，检索不到时明确告知未找到，"
+                "不得用模型内部知识编造："
+                + "、".join(self.strict_tags)
+            )
+        if self.lenient_tags:
+            lines.append(
+                "- 以下分类属于宽松场景，检索不到时可基于通用知识回答"
+                "但必须标注「以下为通用知识，并非企业知识库内容」："
+                + "、".join(self.lenient_tags)
+            )
+        if not lines:
+            lines.append(
+                "- 默认按严格场景处理：检索不到时明确告知未找到，"
+                "不得用模型内部知识编造企业制度/条款。"
+            )
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # 主对话接口
@@ -122,6 +204,8 @@ class AgentManager:
 
         # 0. 请求计时 + 语义缓存查询（精确/语义两级命中直接复用答案）
         _t0 = time.perf_counter()
+        tool_calls_count = 0
+        tool_failures_count = 0
         _query_emb = None
         _cache_ns = self.user_id or "default"
         try:
@@ -193,7 +277,9 @@ class AgentManager:
                 if recall:
                     recall_lines = ["## 相关历史对话片段"]
                     for r in recall:
-                        recall_lines.append(f"- [{r['role']}] {r['content'][:200]}")
+                        recall_lines.append(
+                            f"- [{r['role']}] {r['content'][:self.recall_max_chars]}"
+                        )
                     recall_lines.append("（以上历史片段供参考，不要直接引用为事实）")
                     recall_messages = "\n".join(recall_lines)
             except Exception:
@@ -201,7 +287,10 @@ class AgentManager:
 
         # 3. 构建 system prompt（注入 Skill 概览 + 语义回忆）
         skill_intro = self.skill_manager.get_intro() if self.skill_manager else ""
-        system_prompt = self.SYSTEM_PROMPT_TPL.format(skill_intro=skill_intro)
+        system_prompt = self.SYSTEM_PROMPT_TPL.format(
+            skill_intro=skill_intro,
+            fallback_rule=self._build_fallback_rule(),
+        )
         if recall_messages:
             system_prompt += "\n\n" + recall_messages
         # 注入用户画像和历史摘要
@@ -230,7 +319,9 @@ class AgentManager:
                     if running_summary:
                         if user_context:
                             user_context += "\n\n"
-                        user_context += "## 对话摘要\n" + running_summary[:300]
+                        user_context += (
+                            "## 对话摘要\n" + running_summary[:self.summary_max_chars]
+                        )
             except Exception:
                 pass
         if user_context:
@@ -261,20 +352,21 @@ class AgentManager:
             llm_client = self.rag_pipeline.llm_client
             llm_model = self.rag_pipeline.llm_model
 
-            MAX_REACT_ITERATIONS = 5
-            MAX_TOOL_RESULT_CHARS = 3000  # 工具结果截断上限，防止撑爆上下文
             react_messages = list(messages)
             last_tool_name = None
             last_tool_args = None
             # 死循环检测：同一工具 + 同一参数连续调用超过 2 次 → 中断
             tool_call_fingerprints: Dict[str, int] = {}
+            # 无进展检测：换了参数但结果基本相同（检索命中集合重复）也算无进展
+            last_result_signature = None
+            no_progress_count = 0
             # 工具白名单：LLM 可能输出幻觉工具名，先校验再执行
             known_tool_names = (
                 set(self.tool_router.get_tool_names())
                 if self.tool_router else set()
             )
 
-            for iteration in range(MAX_REACT_ITERATIONS):
+            for iteration in range(self.max_loop_rounds):
                 if stream_callback is not None:
                     stream = await llm_client.chat.completions.create(
                         model=llm_model,
@@ -282,7 +374,7 @@ class AgentManager:
                         tools=tools if tools else None,
                         tool_choice="auto" if tools else None,
                         temperature=0.7,
-                        max_tokens=1000,
+                        max_tokens=self.llm_tokens["react_loop"],
                         stream=True,
                     )
                     msg = await self._collect_stream_message(stream, stream_callback)
@@ -293,7 +385,7 @@ class AgentManager:
                         tools=tools if tools else None,
                         tool_choice="auto" if tools else None,
                         temperature=0.7,
-                        max_tokens=1000,
+                        max_tokens=self.llm_tokens["react_loop"],
                     )
                     msg = response.choices[0].message
 
@@ -359,11 +451,21 @@ class AgentManager:
 
                         # 4) 执行工具（异常隔离：单个工具抛错不中断整个对话）
                         try:
+                            tool_calls_count += 1
                             if func_name == "search_knowledge_base":
                                 # 复杂查询：先多查询分解 + HyDE 增强检索，失败走原路径
                                 expanded = await self._search_with_expansion(func_args)
                                 if expanded is not None:
                                     tool_result = expanded
+                                elif self.self_rag_enabled:
+                                    # Self-RAG：检索后 LLM 判断充分性，不足则改写再检
+                                    self_rag_result = await self._search_with_self_rag(func_args)
+                                    if self_rag_result is not None:
+                                        tool_result = self_rag_result
+                                    else:
+                                        tool_result = await asyncio.to_thread(
+                                            self.tool_router.call_skill_tool, func_name, func_args
+                                        )
                                 else:
                                     tool_result = await asyncio.to_thread(
                                         self.tool_router.call_skill_tool, func_name, func_args
@@ -374,15 +476,63 @@ class AgentManager:
                                     self.tool_router.call_skill_tool, func_name, func_args
                                 )
                         except Exception as e:
+                            tool_failures_count += 1
                             tool_result = f"工具 {func_name} 执行异常：{e}"
 
-                        # 5) 超长工具结果：先 LLM 压缩（保留关键信息），失败回退截断
-                        if len(tool_result) > AgentManager.MAX_TOOL_RESULT_CHARS:
-                            compressed = await self._compress_tool_result(message, tool_result)
+                        # 4.5) 检索空结果兜底（四层框架）：记录失败 query（系统层）、
+                        # 低相关候选（交互层）、strict/lenient 场景话术（生成层）
+                        if (
+                            func_name == "search_knowledge_base"
+                            and "未找到相关内容" in tool_result
+                        ):
+                            tool_result = await self._handle_missed_retrieval(
+                                # 记录/抢救用用户原始问题：知识库盲区分析
+                                # 面向的是"用户问什么"，而不是 LLM 改写后的工具参数
+                                message,
+                                str(func_args.get("tag", "")),
+                                tool_result,
+                            )
+
+                        # 5) 上下文预算：按"窗口 − 当前上下文 − 输出预留 − 安全余量"
+                        #    动态计算本轮工具结果上限，超过先 LLM 压缩，失败回退截断
+                        _current_chars = sum(
+                            len(m.get("content") or "")
+                            + sum(
+                                len(tc.get("function", {}).get("arguments", "") or "")
+                                for tc in (m.get("tool_calls") or [])
+                            )
+                            for m in react_messages
+                        )
+                        budget_chars = self._compute_tool_result_budget(
+                            _current_chars,
+                            self.max_loop_rounds - iteration,
+                            self.budget_config,
+                        )
+                        if len(tool_result) > budget_chars:
+                            compressed = await self._compress_tool_result(
+                                message, tool_result, max_chars=budget_chars
+                            )
                             if compressed:
                                 tool_result = compressed + "\n...[内容过长已压缩]"
                             else:
-                                tool_result = tool_result[:AgentManager.MAX_TOOL_RESULT_CHARS] + "\n...[内容过长已截断]"
+                                tool_result = tool_result[:budget_chars] + "\n...[内容过长已截断]"
+
+                        # 6) 无进展检测：结果签名与上一轮相同 → 计数；连续达到阈值
+                        #    则追加系统提示，让 LLM 停止重复检索（指纹防"同参数"，
+                        #    无进展防"换参数但结果一样"，两层互补）
+                        _sig = self._tool_result_signature(func_name, tool_result)
+                        if _sig:
+                            if _sig == last_result_signature:
+                                no_progress_count += 1
+                            else:
+                                no_progress_count = 0
+                            last_result_signature = _sig
+                            if no_progress_count >= self.no_progress_threshold:
+                                tool_result += (
+                                    "\n\n[系统提示] 本轮检索/工具结果与上一轮基本相同，"
+                                    "未获得新信息。请停止重复检索，直接基于已有信息回答，"
+                                    "或换一个更具体/不同角度的查询词重新检索。"
+                                )
 
                         round_has_valid_call = True
                         react_messages.append({
@@ -456,7 +606,7 @@ class AgentManager:
                     resp = await self.rag_pipeline.llm_client.chat.completions.create(
                         model=self.rag_pipeline.llm_model,
                         messages=[{"role": "user", "content": prompt}],
-                        temperature=0.3, max_tokens=400,
+                        temperature=0.3, max_tokens=self.llm_tokens["summary"],
                     )
                     raw = resp.choices[0].message.content or ""
                     _m = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', raw)
@@ -488,15 +638,34 @@ class AgentManager:
                 from ..eval.alerts import check_and_alert as _alert
                 eval_answer = response_data.get("answer", "")
                 if eval_answer:
-                    score = await Evaluator().evaluate(message, eval_answer)
+                    # 记录本轮注入的记忆上下文（回忆片段/画像/摘要）：
+                    # badcase 回溯时能定位"是不是某条记忆污染带偏了回答"
+                    memory_context = "\n".join(
+                        part for part in (recall_messages, user_context) if part
+                    )[:300]
+                    # 传检索上下文：Judge 额外评估"忠实度"（答案是否基于检索资料）
+                    score = await Evaluator().evaluate(
+                        message, eval_answer, contexts=last_tool_result
+                    )
                     if score:
                         record_score(message, eval_answer,
                                      score.relevance, score.completeness,
-                                     score.usefulness, score.explanation)
-                        if score.usefulness < 3 or score.relevance < 3:
+                                     score.usefulness, score.explanation,
+                                     memory_context=memory_context,
+                                     faithfulness=score.faithfulness)
+                        if (
+                            score.usefulness < 3
+                            or score.relevance < 3
+                            or (
+                                score.faithfulness is not None
+                                and score.faithfulness < 3
+                            )
+                        ):
                             _alert(message, eval_answer, score.relevance,
                                    score.completeness, score.usefulness,
-                                   score.explanation)
+                                   score.explanation,
+                                   memory_context=memory_context,
+                                   faithfulness=score.faithfulness)
                             try:
                                 # 复用已有 pipeline：不再重复加载 embedding/rerank 模型
                                 contexts = await asyncio.to_thread(
@@ -515,7 +684,7 @@ class AgentManager:
                                     resp = await self.rag_pipeline.llm_client.chat.completions.create(
                                         model=self.rag_pipeline.llm_model,
                                         messages=[{"role": "user", "content": prompt}],
-                                        temperature=0.7, max_tokens=500,
+                                        temperature=0.7, max_tokens=self.llm_tokens["fallback"],
                                     )
                                     fallback = resp.choices[0].message.content or ""
                                     if fallback:
@@ -571,6 +740,8 @@ class AgentManager:
                 input_chars=sum(len(m.get("content", "")) for m in messages),
                 output_chars=len(_answer),
                 alert=bool(response_data.get("fallback")),
+                tool_calls=tool_calls_count,
+                tool_failures=tool_failures_count,
             )
         except Exception:
             pass
@@ -648,7 +819,8 @@ class AgentManager:
             }
         return {"role": "assistant", "content": getattr(msg, "content", "") or ""}
 
-    # 工具结果压缩上限（Advanced RAG：超长先 LLM 压缩，失败回退截断）
+    # 工具结果压缩上限默认值（实际值以 config/loop_config.yaml 的 budget 段为准；
+    # 保留类常量是为了向后兼容与单测构造，运行期一律用 self.tool_result_max_chars）
     MAX_TOOL_RESULT_CHARS = 3000
 
     # 指代/模糊表述标记：命中才触发查询改写，避免每次召回都多一次 LLM 调用
@@ -681,8 +853,14 @@ class AgentManager:
         """轻量检测查询是否可能含指代（零成本，命中才触发 LLM 改写）"""
         return any(m in query for m in AgentManager.REFERENCE_MARKERS)
 
-    async def _compress_tool_result(self, query: str, tool_result: str) -> Optional[str]:
-        """LLM 压缩超长工具结果（Advanced RAG 生成层优化）；失败返回 None 由截断兜底"""
+    async def _compress_tool_result(
+        self, query: str, tool_result: str, max_chars: Optional[int] = None
+    ) -> Optional[str]:
+        """LLM 压缩超长工具结果（Advanced RAG 生成层优化）；失败返回 None 由截断兜底。
+
+        max_chars 是本次压缩的目标长度（上下文预算动态算出的本轮上限），
+        不传时回退到配置上限 self.tool_result_max_chars。
+        """
         try:
             if not self.rag_pipeline or not self.rag_pipeline.llm_client:
                 return None
@@ -692,10 +870,232 @@ class AgentManager:
                 self.rag_pipeline.llm_model,
                 query,
                 tool_result,
-                AgentManager.MAX_TOOL_RESULT_CHARS,
+                max_chars if max_chars is not None else self.tool_result_max_chars,
             )
         except Exception:
             return None
+
+    @staticmethod
+    def _compute_tool_result_budget(
+        current_chars: int,
+        remaining_rounds: int,
+        budget_config: Optional[dict] = None,
+    ) -> int:
+        """按上下文预算公式计算本轮工具结果上限（字符数）。
+
+        公式：可用预算 = 模型窗口 − 当前上下文（system/历史/已有轮次）估算
+                     − 输出预留 − 安全余量
+        再按剩余轮数均摊（本轮最多用一半，给后续轮留余地），
+        最后 clamp 到 [tool_result_min_chars, tool_result_max_chars]。
+
+        current_chars：当前 messages 的字符数估算；remaining_rounds：剩余轮数（≥1）。
+        纯函数，便于单测：窗口很小/上下文很高时回退到下限，正常时在上限内。
+        """
+        cfg = budget_config or {}
+        window = int(cfg.get("model_window_tokens", 64000))
+        max_chars = int(cfg.get("tool_result_max_chars", 3000))
+        min_chars = int(cfg.get("tool_result_min_chars", 500))
+        output_reserve = int(cfg.get("output_reserve_tokens", 2000))
+        safety = int(cfg.get("safety_margin_tokens", 4000))
+        chars_per_token = float(cfg.get("chars_per_token", 1.0))
+        remaining = max(int(remaining_rounds), 1)
+
+        current_tokens = int(current_chars * chars_per_token)
+        available_tokens = window - current_tokens - output_reserve - safety
+        per_round_chars = int(
+            available_tokens / remaining * 0.5 * (1.0 / chars_per_token)
+        )
+        return max(min_chars, min(max_chars, per_round_chars))
+
+    @staticmethod
+    def _tool_result_signature(func_name: str, result: str) -> str:
+        """工具结果签名：用于无进展检测。
+
+        search_knowledge_base 用「来源章节集合 + 命中段数」作签名——两个不同查询
+        若命中的文档集合相同，视为无新信息；其他工具用规范化文本前缀兜底。
+        返回空串表示无法签名（空结果等），不参与无进展计数。
+        """
+        if not result:
+            return ""
+        if func_name == "search_knowledge_base":
+            sections = sorted(
+                set(re.findall(r"（来源章节[:：]?\s*(.+)）", result))
+            )
+            if sections:
+                return f"kb:{len(sections)}:{'|'.join(sections)}"
+        norm = re.sub(r"\[\d+\]", "", result)
+        norm = re.sub(r"\s+", "", norm)[:200]
+        return f"text:{norm}"
+
+    async def _handle_missed_retrieval(
+        self, query: str, tag: str, tool_result: str
+    ) -> str:
+        """检索空结果的兜底链（第二篇文章四层框架）：
+
+        1. 系统层：记录失败 query（missed_queries.jsonl），供高频未命中聚合
+           反哺知识库（"失败 query 是金矿"闭环）；
+        2. 交互层：放大召回（不精排）拿低相关候选，附"仅供参考"提示；
+        3. 生成层：按场景标签回填话术——strict 明确拒绝编造，
+           lenient 允许通用知识兜底但必须标注来源。
+        """
+        # 1) 失败 query 日志（系统层闭环）
+        try:
+            from ..eval.missed_queries import record_missed
+            await asyncio.to_thread(record_missed, query, tag, reason="empty")
+        except Exception:
+            pass
+
+        # 2) 低相关候选（交互层：检索不到精确匹配时退而求其次）
+        candidate_hint = ""
+        try:
+            pipeline = getattr(self.tool_router, "skill_pipeline", None)
+            if pipeline is None:
+                pipeline = self.rag_pipeline
+            if pipeline is not None:
+                # 不精排 + 放宽 top_k：找回被相关性阈值过滤掉但可能仍相关的候选
+                low_rel = await asyncio.to_thread(
+                    pipeline.retrieve, query, 3, False, tag
+                )
+                low_rel = [c for c in low_rel if c.get("content")]
+                if low_rel:
+                    parts = [
+                        "\n\n以下资料相关度较低，仅供参考"
+                        "（未达到精确匹配阈值）："
+                    ]
+                    for c in low_rel[:2]:
+                        sec = (
+                            c.get("section", "")
+                            or c.get("parent_section", "")
+                        )
+                        line = f"- {c['content'][:120]}"
+                        if sec:
+                            line += f"（来源：{sec}）"
+                        parts.append(line)
+                    candidate_hint = "\n".join(parts)
+        except Exception:
+            pass
+
+        # 3) 场景话术（生成层：strict / lenient 边界）
+        if tag in self.lenient_tags:
+            guidance = (
+                "\n\n[系统提示] 知识库中未找到直接匹配内容（宽松场景）。"
+                "如果用户问题属于通用常识，可以基于通用知识回答，"
+                "但必须在开头标注「以下为通用知识，并非企业知识库内容」；"
+                "如果是企业专属问题，请引导用户换关键词或补充细节。"
+            )
+        else:
+            guidance = (
+                "\n\n[系统提示] 知识库中未找到相关内容（严格场景）。"
+                "请明确告知用户未找到，并引导其换关键词或补充细节，"
+                "不要用模型内部知识编造企业制度/条款。"
+            )
+        return tool_result + candidate_hint + guidance
+
+    async def _search_with_self_rag(self, args: dict) -> Optional[str]:
+        """Self-RAG 单步反思：检索后 LLM 判断片段是否足够回答，不足则改写查询补检。
+
+        与多查询分解互补：后者在检索前拆分复杂问题，本方法在检索后做充分性判断
+        （Agent 驱动迭代检索的反思环节）。返回与 search_knowledge_base 一致的
+        格式化结果；失败/未启用时返回 None 走原路径。
+        """
+        try:
+            if not self.rag_pipeline or not self.rag_pipeline.llm_client:
+                return None
+            pipeline = getattr(self.tool_router, "skill_pipeline", None)
+            if pipeline is None:
+                return None
+            query = str(args.get("query", "")).strip()
+            tag = str(args.get("tag", "")).strip()
+            if not query or not tag:
+                return None
+
+            # 第 1 次检索（复用已加载 pipeline，不重复初始化模型）
+            contexts = await asyncio.to_thread(pipeline.retrieve, query, 3, True, tag)
+            if not contexts:
+                return None
+            first = self._format_search_result(query, tag, contexts)
+
+            # 充分性判断：片段能否回答用户问题
+            prompt = (
+                "你是检索质量评估器。判断下面的检索片段是否足以回答用户问题。\n\n"
+                f"用户问题：{query}\n\n检索片段：\n{first}\n\n"
+                '仅输出 JSON：{"sufficient": true/false, '
+                '"rewritten_query": "不足时改写后的检索词（足够时填空）"}'
+            )
+            resp = await self.rag_pipeline.llm_client.chat.completions.create(
+                model=self.rag_pipeline.llm_model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=self.llm_tokens["self_rag_judge"],
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+            data = self._parse_json_loose(raw)
+            if data.get("sufficient") is True:
+                return first
+
+            rewritten = str(data.get("rewritten_query") or "").strip()
+            if not rewritten or rewritten == query:
+                return first
+
+            # 补检：最多 self_rag_max_rounds 次，每次用改写查询再检并按内容去重合并
+            seen = {c.get("content", "")[:80] for c in contexts}
+            merged = list(contexts)
+            for _ in range(max(self.self_rag_max_rounds, 1)):
+                contexts2 = await asyncio.to_thread(
+                    pipeline.retrieve, rewritten, 3, True, tag
+                )
+                if not contexts2:
+                    break
+                added = False
+                for c in contexts2:
+                    key = c.get("content", "")[:80]
+                    if key and key not in seen:
+                        merged.append(c)
+                        seen.add(key)
+                        added = True
+                if not added:
+                    # 补检未带来新信息：即使配置允许多次，也不做无意义重复
+                    break
+            return self._format_search_result(query, tag, merged[:3])
+        except Exception:
+            return None
+
+    @staticmethod
+    def _format_search_result(query: str, tag: str, contexts: list) -> str:
+        """把检索结果格式化成与 search_knowledge_base 工具一致的文本"""
+        if not contexts:
+            return f"知识库「{tag}」中未找到相关内容。"
+        result = f"检索到以下相关文档（来源：{tag}）：\n\n"
+        for i, ctx in enumerate(contexts):
+            result += f"[{i+1}] {ctx.get('content', '')}\n"
+            sec = ctx.get("section", "") or ctx.get("parent_section", "")
+            if sec:
+                result += f"  （来源章节：{sec}）\n"
+            result += "\n"
+        return result
+
+    @staticmethod
+    def _parse_json_loose(raw: str) -> dict:
+        """宽松解析 LLM 输出的 JSON（容忍代码块包裹/前后说明文字）"""
+        if not raw:
+            return {}
+        _m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw)
+        if _m:
+            raw = _m.group(1)
+        try:
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, TypeError):
+            pass
+        brace_start = raw.find("{")
+        brace_end = raw.rfind("}")
+        if brace_start >= 0 and brace_end > brace_start:
+            try:
+                data = json.loads(raw[brace_start:brace_end + 1])
+                return data if isinstance(data, dict) else {}
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return {}
 
     async def _search_with_expansion(self, args: dict) -> Optional[str]:
         """复杂查询增强检索：分解子查询 + HyDE 假设文档，多路检索合并去重。
@@ -710,7 +1110,12 @@ class AgentManager:
             tag = str(args.get("tag", "")).strip()
             if not query or not tag:
                 return None
-            if not self._should_expand_query(query):
+            expand_chars = int(
+                self.loop_config.get("query_expansion", {}).get(
+                    "max_chars_trigger", 25
+                )
+            )
+            if not self._should_expand_query(query, expand_chars):
                 return None
 
             from ..rag.query_expansion import decompose_query, generate_hypothetical_doc
@@ -751,10 +1156,10 @@ class AgentManager:
             return None
 
     @staticmethod
-    def _should_expand_query(query: str) -> bool:
-        """规则触发多查询增强：问题含多主题词或较长"""
+    def _should_expand_query(query: str, max_chars_trigger: int = 25) -> bool:
+        """规则触发多查询增强：问题含多主题词或较长（长度阈值可配置）"""
         markers = ("分别", "对比", "以及", "哪些", "所有", "不同", "各")
-        return any(m in query for m in markers) or len(query) > 25
+        return any(m in query for m in markers) or len(query) > max_chars_trigger
 
     async def _rewrite_query_for_recall(self, query: str) -> str:
         """查询改写/指代补全：把"那个方案"补全成具体实体。
@@ -775,7 +1180,7 @@ class AgentManager:
                 model=self.rag_pipeline.llm_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
-                max_tokens=100,
+                max_tokens=self.llm_tokens["recall_rewrite"],
             )
             rewritten = (resp.choices[0].message.content or "").strip()
             return rewritten or query

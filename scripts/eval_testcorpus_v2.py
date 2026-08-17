@@ -401,6 +401,26 @@ def mrr(results, gts):
     return sum(rrs) / len(rrs) if rrs else 0.0
 
 
+def precision_at_k(results, gts, k):
+    """Precision@k：top-k 中与标准答案相关的文档占比。
+
+    本项目 QA 是"单答案"（answer_gt 为原文片段），所以相关文档数最多 = 命中
+    该片段的 chunk 数（父子分块下同一父块的多个子块都可能含答案）。
+    P@k 在此场景衡量的是"噪音稀释程度"——top-k 里无关内容占比越高，
+    说明 Rerank/Embedding 区分度不足，噪声越可能带偏 LLM。
+    """
+    precisions = []
+    for res, gt in zip(results, gts):
+        gt_str = str(gt) if gt else ""
+        relevant = sum(
+            1 for r in res[:k]
+            if gt_str in r.get("content", "")
+            or gt_str in r.get("parent_content", "")
+        )
+        precisions.append(relevant / k if res else 0.0)
+    return sum(precisions) / len(precisions) if precisions else 0.0
+
+
 def ndcg(results, gts, queries, k):
     ndcgs = []
     for res, gt, q in zip(results, gts, queries):
@@ -781,7 +801,10 @@ def evaluate():
         "混合+RRF+Cross-Encoder精排": rr,
     }
 
-    hdr = f"{'策略':<28} | {'HR@1':<7} | {'HR@3':<7} | {'HR@5':<7} | {'HR@10':<8} | {'MRR':<7} | {'P50(ms)'}"
+    hdr = (
+        f"{'策略':<28} | {'HR@1':<7} | {'HR@3':<7} | {'HR@5':<7} | {'HR@10':<8} | "
+        f"{'P@1':<7} | {'P@3':<7} | {'MRR':<7} | {'P50(ms)'}"
+    )
     print(hdr, flush=True)
     print("-" * len(hdr), flush=True)
 
@@ -798,13 +821,22 @@ def evaluate():
             p50 = round(float(np.median(lr) * 1000), 1)
         else:
             p50 = round(float(np.median(lh) * 1000), 1)
-        report[sname] = {"HR@1": h1, "HR@3": h3, "HR@5": h5, "HR@10": h10, "MRR": m}
-        print(f"{sname:<28} | {h1:<7.2%} | {h3:<7.2%} | {h5:<7.2%} | {h10:<8.2%} | {m:<7.4f} | {p50}", flush=True)
+        p1 = precision_at_k(res, gt, 1)
+        p3 = precision_at_k(res, gt, 3)
+        report[sname] = {
+            "HR@1": h1, "HR@3": h3, "HR@5": h5, "HR@10": h10,
+            "P@1": p1, "P@3": p3, "MRR": m,
+        }
+        print(
+            f"{sname:<28} | {h1:<7.2%} | {h3:<7.2%} | {h5:<7.2%} | {h10:<8.2%} | "
+            f"{p1:<7.2%} | {p3:<7.2%} | {m:<7.4f} | {p50}",
+            flush=True,
+        )
 
     keys = list(strategies.keys())
     b, p = report[keys[0]], report[keys[-1]]
     print(f"\n提升率（{keys[-1]} vs {keys[0]}）：", flush=True)
-    for m in ["HR@1", "HR@3", "HR@5", "MRR"]:
+    for m in ["HR@1", "HR@3", "HR@5", "P@1", "MRR"]:
         if b.get(m, 0) > 0:
             pct = (p[m] - b[m]) / b[m] * 100
             print(f"  {m}: +{pct:.1f}%", flush=True)
@@ -856,8 +888,8 @@ def evaluate():
         f"| 答案保留率 | {retained}/{len(qa_pairs)} = {retained/len(qa_pairs):.1%} |\n",
         f"\n",
         f"## 三种策略对比\n",
-        f"| 策略 | HR@1 | HR@3 | HR@5 | HR@10 | MRR | P50(ms) |\n",
-        f"|---|---|---|---|---|---|---|\n",
+        f"| 策略 | HR@1 | HR@3 | HR@5 | HR@10 | P@1 | P@3 | MRR | P50(ms) |\n",
+        f"|---|---|---|---|---|---|---|---|---|\n",
     ]
     for sname in strategies:
         m = report[sname]
@@ -867,7 +899,11 @@ def evaluate():
             p50_ms = round(float(np.median(lr) * 1000), 1)
         else:
             p50_ms = round(float(np.median(lh) * 1000), 1)
-        lines.append(f"| {sname} | {m['HR@1']:.2%} | {m['HR@3']:.2%} | {m['HR@5']:.2%} | {m['HR@10']:.2%} | {m['MRR']:.4f} | {p50_ms}ms |\n")
+        lines.append(
+            f"| {sname} | {m['HR@1']:.2%} | {m['HR@3']:.2%} | {m['HR@5']:.2%} | "
+            f"{m['HR@10']:.2%} | {m['P@1']:.2%} | {m['P@3']:.2%} | "
+            f"{m['MRR']:.4f} | {p50_ms}ms |\n"
+        )
     lines.append(f"\n")
     lines.append(f"## 逐条命中情况（V=纯向量, H=混合+RRF, R=精排）\n")
     lines.append(f"| # | Query | V | H | R |\n")

@@ -861,12 +861,18 @@ async def get_eval_summary(admin: dict = Depends(verify_admin_token)):
     avg_r = sum(s["relevance"] for s in recent) / len(recent)
     avg_c = sum(s["completeness"] for s in recent) / len(recent)
     avg_u = sum(s["usefulness"] for s in recent) / len(recent)
+    faith_scores = [
+        s["faithfulness"] for s in recent
+        if s.get("faithfulness") is not None
+    ]
+    avg_f = round(sum(faith_scores) / len(faith_scores), 2) if faith_scores else None
     return {
         "total_scores": total,
         "recent_samples": len(recent),
         "avg_relevance": round(avg_r, 2),
         "avg_completeness": round(avg_c, 2),
         "avg_usefulness": round(avg_u, 2),
+        "avg_faithfulness": avg_f,
         "alerts": get_summary(),
     }
 
@@ -885,6 +891,19 @@ async def get_realtime_eval(admin: dict = Depends(verify_admin_token)):
     from ..eval.realtime import load
     scores = load()
     return {"scores": scores, "total": len(scores)}
+
+
+@router.get("/eval/missed")
+async def get_missed_queries(
+    admin: dict = Depends(verify_admin_token),
+    top_n: int = Query(20, ge=1, le=100),
+):
+    """检索失败 query 聚合：高频未命中即知识库盲区，反哺知识库迭代"""
+    from ..eval.missed_queries import get_missed_summary, load_missed
+    return {
+        "summary": get_missed_summary(top_n),
+        "total_missed": len(load_missed()),
+    }
 
 
 @router.get("/eval/history")
