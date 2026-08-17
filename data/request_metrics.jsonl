@@ -14,3 +14,6 @@
 {"timestamp": "2026-08-13T18:37:43.421920", "query": "员工持股计划的行权期是多久", "latency_ms": 0.9, "cached": false, "error": null, "input_tokens_est": 76, "output_tokens_est": 2, "alert": false}
 {"timestamp": "2026-08-13T18:54:09.124883", "query": "员工持股计划的行权期是多久", "latency_ms": 15176.3, "cached": false, "error": null, "input_tokens_est": 373, "output_tokens_est": 149, "alert": false}
 {"timestamp": "2026-08-13T18:54:26.142040", "query": "员工持股计划的行权期是多久", "latency_ms": 0.6, "cached": false, "error": null, "input_tokens_est": 76, "output_tokens_est": 2, "alert": false}
+{"timestamp": "2026-08-16T15:59:54.135281", "query": "员工持股计划的行权期是多久", "latency_ms": 0.9, "cached": false, "error": null, "input_tokens_est": 76, "output_tokens_est": 2, "alert": false}
+{"timestamp": "2026-08-16T16:01:32.043502", "query": "你好", "latency_ms": 9169.8, "cached": false, "error": null, "input_tokens_est": 359, "output_tokens_est": 81, "alert": false}
+{"timestamp": "2026-08-17T14:51:00.057017", "query": "员工持股计划的行权期是多久", "latency_ms": 0.6, "cached": false, "error": null, "input_tokens_est": 76, "output_tokens_est": 2, "alert": false}

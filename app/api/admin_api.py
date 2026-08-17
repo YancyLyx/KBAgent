@@ -612,11 +612,14 @@ async def get_user_memory_detail(
     summary = mem.get_running_summary(user_id)
     audit_path = Path(PROFILES_AUDIT_DIR) / f"{user_id}.md"
     audit_md = audit_path.read_text(encoding="utf-8") if audit_path.exists() else ""
+    from ..memory import pref_store
     return {
         "user_id": user_id,
         "profile": profile,
         "running_summary": summary,
         "audit_md": audit_md,
+        "prefs_timeline": pref_store.get_timeline(user_id),
+        "prefs_active": pref_store.get_active(user_id),
     }
 
 

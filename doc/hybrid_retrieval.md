@@ -173,6 +173,20 @@ BM25 引擎排名：① 文档B  ② 文档C
 ### 4. CrossEncoder 重排序
 RRF 合并后的 Top-N 候选由 bge-reranker-base CrossEncoder 重新打分。每对 (query, document) 联合编码计算精确相关性。作为质量关卡：语义相似但与问题无关的文档在此被过滤。
 
+## Advanced RAG 增强（查询/生成/重排层优化）
+
+在混合检索 + 精排之上，支持四项 Advanced RAG 增强：
+
+| 增强 | 模块 | 解决什么 | 启用方式 |
+------|------|---------|---------|
+| 上下文压缩 | `app/rag/context_compressor.py` | 超长工具/检索结果先用 LLM 压缩保留关键信息，替代简单截断（避免切句丢数字） | Agent 工具结果超预算自动触发，失败回退截断 |
+| 多查询分解 | `app/rag/query_expansion.py` | 复杂问题（"差旅和餐补分别怎么规定"）拆子查询分别检索、合并去重 | search_knowledge_base 命中规则（含分别/对比/哪些等词或长查询）自动触发 |
+| HyDE 假设答案检索 | `app/rag/query_expansion.py` | 用 LLM 生成假设答案参与检索，答案文本与文档更相似 | 与多查询同路径，作为额外候选 |
+| MMR 去冗余 | `app/rag/mmr.py` | 重排后 top-k 语义重复，按相关性与多样性平衡重新选择 | `RAGPipeline.retrieve(diversity_rerank=True)` |
+| 相关性阈值过滤 | `Reranker.rerank(threshold=...)` | 重排后剔除低分文档，避免噪声进 LLM | `RAGPipeline.retrieve(min_rerank_score=...)` |
+
+四项均默认关闭/按需触发，不影响默认检索路径与既有评测数据。
+
 ## 标签感知过滤
 
 通过 Skill 系统指定 tag 时，向量检索（ChromaDB `where` 过滤）和 BM25 检索（`_bm25_metas` 逐条验证）都只返回匹配分类的结果，从源头消除跨分类噪声。

@@ -211,11 +211,21 @@ class AgentManager:
                 # 注入路由：纯闲聊不需要用户画像/演进式摘要（省 token，
                 # 也避免闲聊被记忆带偏）；知识/业务类问题才注入
                 if not self._is_small_talk(message):
-                    profile = self.long_memory.get_user_memory(self.user_id)
-                    facts = profile.get("profile", {}).get("preferences", {}).get("extracted_facts", [])
-                    fact_lines = self._format_facts_for_prompt(facts)
-                    if fact_lines:
-                        user_context = "## 用户画像\n" + "\n".join(fact_lines)
+                    # 偏好时间线注入：当前生效偏好（完整历史经状态过滤），
+                    # 交 LLM 综合判断矛盾，发现矛盾先澄清再回答
+                    from ..memory.pref_store import get_active
+                    prefs = get_active(self.user_id, limit=10)
+                    if prefs:
+                        pref_lines = [
+                            f"- {p['updated_at'][:10]}: {p['text']}"
+                            for p in prefs if p.get("text")
+                        ]
+                        if pref_lines:
+                            user_context = "## 用户偏好历史（按时间）\n" + "\n".join(pref_lines)
+                            user_context += (
+                                "\n（若偏好历史存在矛盾或模糊，先向用户澄清再回答，"
+                                "或说明按哪个偏好处理）"
+                            )
                     running_summary = self.long_memory.get_running_summary(self.user_id)
                     if running_summary:
                         if user_context:
@@ -349,16 +359,30 @@ class AgentManager:
 
                         # 4) 执行工具（异常隔离：单个工具抛错不中断整个对话）
                         try:
-                            # 工具内部包含检索+精排（同步 CPU/本地 IO），丢线程池执行
-                            tool_result = await asyncio.to_thread(
-                                self.tool_router.call_skill_tool, func_name, func_args
-                            )
+                            if func_name == "search_knowledge_base":
+                                # 复杂查询：先多查询分解 + HyDE 增强检索，失败走原路径
+                                expanded = await self._search_with_expansion(func_args)
+                                if expanded is not None:
+                                    tool_result = expanded
+                                else:
+                                    tool_result = await asyncio.to_thread(
+                                        self.tool_router.call_skill_tool, func_name, func_args
+                                    )
+                            else:
+                                # 工具内部包含检索+精排（同步 CPU/本地 IO），丢线程池执行
+                                tool_result = await asyncio.to_thread(
+                                    self.tool_router.call_skill_tool, func_name, func_args
+                                )
                         except Exception as e:
                             tool_result = f"工具 {func_name} 执行异常：{e}"
 
-                        # 5) 截断工具返回内容
-                        if len(tool_result) > MAX_TOOL_RESULT_CHARS:
-                            tool_result = tool_result[:MAX_TOOL_RESULT_CHARS] + "\n...[内容过长已截断]"
+                        # 5) 超长工具结果：先 LLM 压缩（保留关键信息），失败回退截断
+                        if len(tool_result) > AgentManager.MAX_TOOL_RESULT_CHARS:
+                            compressed = await self._compress_tool_result(message, tool_result)
+                            if compressed:
+                                tool_result = compressed + "\n...[内容过长已压缩]"
+                            else:
+                                tool_result = tool_result[:AgentManager.MAX_TOOL_RESULT_CHARS] + "\n...[内容过长已截断]"
 
                         round_has_valid_call = True
                         react_messages.append({
@@ -624,6 +648,9 @@ class AgentManager:
             }
         return {"role": "assistant", "content": getattr(msg, "content", "") or ""}
 
+    # 工具结果压缩上限（Advanced RAG：超长先 LLM 压缩，失败回退截断）
+    MAX_TOOL_RESULT_CHARS = 3000
+
     # 指代/模糊表述标记：命中才触发查询改写，避免每次召回都多一次 LLM 调用
     REFERENCE_MARKERS = (
         "上次", "之前", "刚才", "那个", "这个",
@@ -653,6 +680,81 @@ class AgentManager:
     def _may_contain_reference(query: str) -> bool:
         """轻量检测查询是否可能含指代（零成本，命中才触发 LLM 改写）"""
         return any(m in query for m in AgentManager.REFERENCE_MARKERS)
+
+    async def _compress_tool_result(self, query: str, tool_result: str) -> Optional[str]:
+        """LLM 压缩超长工具结果（Advanced RAG 生成层优化）；失败返回 None 由截断兜底"""
+        try:
+            if not self.rag_pipeline or not self.rag_pipeline.llm_client:
+                return None
+            from ..rag.context_compressor import compress_text
+            return await compress_text(
+                self.rag_pipeline.llm_client,
+                self.rag_pipeline.llm_model,
+                query,
+                tool_result,
+                AgentManager.MAX_TOOL_RESULT_CHARS,
+            )
+        except Exception:
+            return None
+
+    async def _search_with_expansion(self, args: dict) -> Optional[str]:
+        """复杂查询增强检索：分解子查询 + HyDE 假设文档，多路检索合并去重。
+
+        Returns:
+            合并后的格式化结果；无需增强/失败返回 None（走原单次检索路径）。
+        """
+        try:
+            if not self.rag_pipeline or not self.rag_pipeline.llm_client:
+                return None
+            query = str(args.get("query", "")).strip()
+            tag = str(args.get("tag", "")).strip()
+            if not query or not tag:
+                return None
+            if not self._should_expand_query(query):
+                return None
+
+            from ..rag.query_expansion import decompose_query, generate_hypothetical_doc
+
+            sub_queries = await decompose_query(
+                self.rag_pipeline.llm_client, self.rag_pipeline.llm_model, query
+            )
+            candidates = [query] + [q for q in sub_queries if q != query]
+            hyde = await generate_hypothetical_doc(
+                self.rag_pipeline.llm_client, self.rag_pipeline.llm_model, query
+            )
+            if hyde:
+                candidates.append(hyde)
+
+            merged: Dict[str, Dict] = {}
+            for q in candidates:
+                ctxs = await asyncio.to_thread(
+                    self.rag_pipeline.retrieve, q, 3, True, tag
+                )
+                for ctx in ctxs:
+                    key = ctx.get("content", "")
+                    if key and key not in merged:
+                        merged[key] = ctx
+            results = list(merged.values())[:3]
+            if not results:
+                return None
+
+            lines = ["检索到以下相关文档：\n"]
+            for i, ctx in enumerate(results):
+                lines.append(f"[{i+1}] {ctx.get('content', '')}")
+                sec = ctx.get("section", "") or ctx.get("parent_section", "")
+                if sec:
+                    lines.append(f"  来源：{sec}")
+                lines.append("")
+            lines.append("（多路查询合并结果）")
+            return "\n".join(lines)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _should_expand_query(query: str) -> bool:
+        """规则触发多查询增强：问题含多主题词或较长"""
+        markers = ("分别", "对比", "以及", "哪些", "所有", "不同", "各")
+        return any(m in query for m in markers) or len(query) > 25
 
     async def _rewrite_query_for_recall(self, query: str) -> str:
         """查询改写/指代补全：把"那个方案"补全成具体实体。

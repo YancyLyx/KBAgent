@@ -4,7 +4,7 @@
 提供基于 Cross-Encoder 的重排序功能。
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from sentence_transformers import CrossEncoder
 import yaml
 
@@ -43,7 +43,8 @@ class Reranker:
         self,
         query: str,
         documents: List[Dict[str, Any]],
-        top_k: int = 3
+        top_k: int = 3,
+        threshold: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """
         对检索结果进行重排序
@@ -52,6 +53,7 @@ class Reranker:
             query: 查询文本
             documents: 待排序文档列表
             top_k: 返回前 k 个结果
+            threshold: 相关性阈值，低于阈值的文档被剔除（None 不启用）
 
         Returns:
             重排序后的文档列表
@@ -78,7 +80,14 @@ class Reranker:
             key=lambda x: x["rerank_score"],
             reverse=True
         )
-        
+
+        # 相关性阈值过滤：剔除明显不相关的文档，避免噪声进 LLM
+        if threshold is not None:
+            sorted_docs = [
+                d for d in sorted_docs
+                if d["rerank_score"] >= threshold
+            ]
+
         return sorted_docs[:top_k]
 
     def rerank_with_threshold(

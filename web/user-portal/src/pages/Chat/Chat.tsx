@@ -1,5 +1,8 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { message as antMessage } from 'antd';
+import { message as antMessage, Modal, Button, List, Input, Space } from 'antd';
+import { Typography } from 'antd';
+
+const { Text } = Typography;
 import Sidebar, { type Session } from '../../components/Sidebar/Sidebar';
 import MessageList, { type Message } from '../../components/MessageList/MessageList';
 import ChatInput from '../../components/ChatInput/ChatInput';
@@ -15,6 +18,10 @@ const Chat: React.FC = () => {
   const [currentSessionId, setCurrentSessionId] = useState<string>();
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
+  const [prefsOpen, setPrefsOpen] = useState(false);
+  const [prefsActive, setPrefsActive] = useState<any[]>([]);
+  const [prefsTimeline, setPrefsTimeline] = useState<any[]>([]);
+  const [newPref, setNewPref] = useState('');
   // 加载会话列表
   const loadSessions = useCallback(async () => {
     try {
@@ -201,6 +208,51 @@ const Chat: React.FC = () => {
     );
   };
 
+  // 用户偏好管理（文件存储 + 时间线）
+  const loadPrefs = useCallback(async () => {
+    try {
+      const data = await chatApi.getPreferences();
+      setPrefsTimeline(data.timeline);
+      setPrefsActive(data.active);
+    } catch (e) {
+      antMessage.error('加载偏好失败');
+    }
+  }, []);
+
+  const handleAddPref = async () => {
+    if (!newPref.trim()) return;
+    try {
+      await chatApi.addPreference(newPref.trim());
+      setNewPref('');
+      await loadPrefs();
+      antMessage.success('已添加');
+    } catch (e) {
+      antMessage.error('添加失败');
+    }
+  };
+
+  const handleUpdatePref = async (id: string, oldText: string) => {
+    const next = window.prompt('修改偏好', oldText);
+    if (!next || next.trim() === oldText) return;
+    try {
+      await chatApi.updatePreference(id, next.trim());
+      await loadPrefs();
+      antMessage.success('已更新');
+    } catch (e) {
+      antMessage.error('更新失败');
+    }
+  };
+
+  const handleDeletePref = async (id: string) => {
+    try {
+      await chatApi.deletePreference(id);
+      await loadPrefs();
+      antMessage.success('已删除');
+    } catch (e) {
+      antMessage.error('删除失败');
+    }
+  };
+
   return (
     <div className={styles.chatPage}>
       <Sidebar
@@ -213,10 +265,48 @@ const Chat: React.FC = () => {
       <div className={styles.chatContainer}>
         <div className={styles.chatHeader}>
           <h2>SmartSupport AI 智能客服</h2>
+          <Button size="small" onClick={() => { loadPrefs(); setPrefsOpen(true); }}>
+            我的偏好
+          </Button>
         </div>
         <MessageList messages={messages} loading={loading} />
         <ChatInput onSend={handleSendMessage} loading={loading} />
       </div>
+      <Modal
+        title="我的偏好（时间线，矛盾会自动澄清）"
+        open={prefsOpen}
+        onCancel={() => setPrefsOpen(false)}
+        footer={null}
+        width={560}
+      >
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <Space.Compact style={{ width: '100%' }}>
+            <Input
+              value={newPref}
+              onChange={(e) => setNewPref(e.target.value)}
+              placeholder="新增一条偏好，如：示例用 Python"
+              onPressEnter={handleAddPref}
+            />
+            <Button type="primary" onClick={handleAddPref}>添加</Button>
+          </Space.Compact>
+          <List
+            size="small"
+            bordered
+            dataSource={prefsActive}
+            locale={{ emptyText: '暂无偏好' }}
+            renderItem={(p: any) => (
+              <List.Item
+                actions={[
+                  <a key="edit" onClick={() => handleUpdatePref(p.id, p.text)}>修改</a>,
+                  <a key="del" onClick={() => handleDeletePref(p.id)} style={{ color: 'red' }}>删除</a>,
+                ]}
+              >
+                <Text>（{String(p.updated_at).slice(0, 10)}）{p.text}</Text>
+              </List.Item>
+            )}
+          />
+        </Space>
+      </Modal>
     </div>
   );
 };

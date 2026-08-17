@@ -113,8 +113,8 @@ KBAgent/
 | 文档 | 内容 |
 |------|------|
 | [doc/architecture.md](doc/architecture.md) | 系统架构与请求流程 |
-| [doc/interview_prep.md](doc/interview_prep.md) | Agent 面试通关手册（项目全景 + 踩坑记录 + 高频问题） |
 | [doc/auth_guide.md](doc/auth_guide.md) | 登录与鉴权详解（token/密码哈希/HMAC/完整流程示例） |
+| [doc/v2_vision.md](doc/v2_vision.md) | V2 愿景：知识库资源化（个人私库 + 共享市场规划） |
 | [doc/skill_system.md](doc/skill_system.md) | 渐进式多知识库路由 |
 | [doc/hybrid_retrieval.md](doc/hybrid_retrieval.md) | RRF 混合检索 |
 | [doc/memory_system.md](doc/memory_system.md) | 多层记忆系统 |

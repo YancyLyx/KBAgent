@@ -1,0 +1,4 @@
+{"id": "e4aebcdcb5ff", "text": "不喜欢吃青菜", "updated_at": "2026-08-16T16:01:32.068915", "source": "manual", "status": "active"}
+{"id": "260d00ac7d5b", "text": "喜欢吃菠菜", "updated_at": "2026-08-16T16:01:32.089690", "source": "manual", "status": "active"}
+{"id": "a610d46c1e11", "text": "其实是不喜欢香菜", "updated_at": "2026-08-16T16:01:32.130450", "source": "manual_edit", "status": "active", "supersedes": "e4aebcdcb5ff"}
+{"id": "b149c0ae2c3b", "text": "", "updated_at": "2026-08-16T16:01:32.173085", "source": "manual", "status": "deleted", "delete_of": "260d00ac7d5b"}

@@ -72,6 +72,8 @@ class RAGPipeline:
         top_k: int = 3,
         use_rerank: bool = True,
         tag: Optional[str] = None,
+        diversity_rerank: bool = False,
+        min_rerank_score: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """
         检索相关文档
@@ -101,8 +103,28 @@ class RAGPipeline:
             return results[:top_k]
         
         # 重排序（在父块级别）
-        reranked_results = self.reranker.rerank(query, results, top_k=top_k)
+        reranked_results = self.reranker.rerank(
+            query, results, top_k=top_k, threshold=min_rerank_score
+        )
+        if diversity_rerank and len(reranked_results) > 1:
+            # MMR 去冗余：相关性 + 多样性平衡，避免 top-k 语义重复
+            reranked_results = self._apply_mmr(query, reranked_results, top_k=top_k)
         return reranked_results
+
+    def _apply_mmr(
+        self,
+        query: str,
+        reranked: List[Dict[str, Any]],
+        top_k: int = 3,
+        lambda_: float = 0.7,
+    ) -> List[Dict[str, Any]]:
+        """MMR 去冗余：对重排后文档编码，按相关性与多样性重新选择顺序"""
+        texts = [d.get("content", "") for d in reranked]
+        embs = self.vector_store.encode_text(texts)
+        scores = [float(d.get("rerank_score", 0)) for d in reranked]
+        from .mmr import mmr_rerank
+        order = mmr_rerank(embs, scores, lambda_=lambda_, top_k=top_k)
+        return [reranked[i] for i in order]
 
     async def generate(
         self,

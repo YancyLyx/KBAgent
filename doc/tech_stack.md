@@ -13,7 +13,7 @@
 | PDF 解析 | PyMuPDF + pdfplumber | 版式/表格提取 |
 | 文本切割 | LangChain RecursiveCharacterTextSplitter + 自研章节分块（PDF 字号 / Markdown 标题） | 两级分块：父块按章节语义，子块按 RecursiveCharacterTextSplitter |
 | 配置 | PyYAML + python-dotenv | 配置项与密钥管理 |
-| 数据库 | SQLite（标准库 sqlite3） | 会话/文档/摘要/画像持久化 |
+| 数据库 | SQLite（会话/文档/摘要/话题）+ JSONL 文件（用户偏好） | 会话/文档/摘要用 SQLite；偏好用文件只追加保留时间线 |
 | 语义缓存 | 进程内 LRU + TTL（接口可换 Redis） | 精确 + 语义两级命中 |
 | 评测 | LLM-as-Judge（OpenAI 兼容接口）+ 本地检索指标脚本 | 实时三维评分 + 离线 HR/MRR 评测 |
 

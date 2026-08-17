@@ -327,6 +327,78 @@ async def chat_stream(
         raise HTTPException(status_code=500, detail=f"处理请求失败: {str(e)}")
 
 
+
+# ==================== 用户偏好 CRUD（文件存储） ====================
+
+class PrefCreateRequest(BaseModel):
+    """新增偏好请求"""
+    text: str = Field(..., description="偏好内容", min_length=1, max_length=500)
+
+
+class PrefUpdateRequest(BaseModel):
+    """修改偏好请求"""
+    text: str = Field(..., description="修改后的偏好内容", min_length=1, max_length=500)
+
+
+def _require_user(authorization: Optional[str]) -> str:
+    user_id, _ = _resolve_user_id(authorization)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="未认证：请先通过 /chat 获取身份 token")
+    return user_id
+
+
+@app.get("/api/profile/preferences")
+async def get_my_preferences(authorization: Optional[str] = Header(None)):
+    """查看自己的偏好：完整时间线 + 当前生效"""
+    user_id = _require_user(authorization)
+    from ..memory import pref_store
+    return {
+        "timeline": pref_store.get_timeline(user_id),
+        "active": pref_store.get_active(user_id),
+    }
+
+
+@app.post("/api/profile/preferences")
+async def add_preference(
+    body: PrefCreateRequest,
+    authorization: Optional[str] = Header(None),
+):
+    """手动新增一条偏好"""
+    user_id = _require_user(authorization)
+    from ..memory import pref_store
+    entry = pref_store.append_pref(user_id, body.text, source="manual")
+    return {"message": "已添加", "entry": entry}
+
+
+@app.put("/api/profile/preferences/{pref_id}")
+async def update_preference(
+    pref_id: str,
+    body: PrefUpdateRequest,
+    authorization: Optional[str] = Header(None),
+):
+    """修改偏好：追加新条目并取代旧条目（历史保留）"""
+    user_id = _require_user(authorization)
+    from ..memory import pref_store
+    ok = pref_store.update_pref(user_id, pref_id, body.text)
+    if not ok:
+        raise HTTPException(status_code=404, detail="偏好不存在或内容为空")
+    return {"message": "已更新"}
+
+
+@app.delete("/api/profile/preferences/{pref_id}")
+async def delete_preference(
+    pref_id: str,
+    authorization: Optional[str] = Header(None),
+):
+    """删除偏好（软删除，历史保留）"""
+    user_id = _require_user(authorization)
+    from ..memory import pref_store
+    ok = pref_store.delete_pref(user_id, pref_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="偏好不存在")
+    return {"message": "已删除"}
+
+
 @app.get("/sessions/{session_id}/history")
 async def get_session_history(
     session_id: str,

@@ -53,6 +53,20 @@ export const chatApi = {
     return client.delete(`/sessions/${sessionId}`);
   },
 
+  // 用户偏好 CRUD（JSONL 文件存储）
+  getPreferences: (): Promise<{ timeline: any[]; active: any[] }> => {
+    return client.get('/api/profile/preferences');
+  },
+  addPreference: (text: string): Promise<{ message: string; entry: any }> => {
+    return client.post('/api/profile/preferences', { text });
+  },
+  updatePreference: (id: string, text: string): Promise<{ message: string }> => {
+    return client.put(`/api/profile/preferences/${id}`, { text });
+  },
+  deletePreference: (id: string): Promise<{ message: string }> => {
+    return client.delete(`/api/profile/preferences/${id}`);
+  },
+
   // 流式发送消息（SSE）：token 逐段回调，done 携带完整回复
   sendMessageStream: (
     data: ChatRequest,
