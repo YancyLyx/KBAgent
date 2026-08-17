@@ -55,13 +55,7 @@ async def test_hyde():
     assert await generate_hypothetical_doc(_client_failing(), "m", "q") is None
 
 
-def test_should_expand_query():
-    assert AgentManager._should_expand_query("差旅和餐补分别怎么规定")
-    assert AgentManager._should_expand_query("这是一段非常长的问题，超过二十五个字，需要分解成子查询来处理")
-    assert not AgentManager._should_expand_query("行权期是多久")
-
-
-def _agent_with_retrieve(retrieve_fn):
+def _agent_with_retrieve(retrieve_fn, llm_content='["子问题A", "子问题B"]'):
     agent = AgentManager(
         user_id="u",
         enable_memory=False,
@@ -69,7 +63,7 @@ def _agent_with_retrieve(retrieve_fn):
         enable_tools=False,
     )
     agent.rag_pipeline = SimpleNamespace(
-        llm_client=_client_responding('["子问题A", "子问题B"]'),
+        llm_client=_client_responding(llm_content),
         llm_model="m",
         retrieve=retrieve_fn,
     )
@@ -93,13 +87,27 @@ async def test_search_with_expansion_merges():
 
 
 @pytest.mark.asyncio
-async def test_search_with_expansion_skips_simple():
+async def test_search_with_expansion_llm_judges_simple_no_split():
+    """LLM 判断无需拆分（返回 [原 query]）→ 不增强，走原单次检索路径"""
     def fake_retrieve(query, top_k=3, use_rerank=True, tag=None):
         return [{"content": "x", "section": ""}]
 
-    agent = _agent_with_retrieve(fake_retrieve)
-    # 短查询不触发增强 → 返回 None（走原路径）
-    assert await agent._search_with_expansion({"query": "行权期", "tag": "股权激励"}) is None
+    agent = _agent_with_retrieve(
+        fake_retrieve, llm_content='["行权期是多久"]'
+    )
+    assert await agent._search_with_expansion(
+        {"query": "行权期是多久", "tag": "股权激励"}
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_search_with_expansion_disabled_by_config():
+    """配置关闭 query_expansion 时直接走原路径"""
+    agent = _agent_with_retrieve(lambda *a, **k: [])
+    agent.query_expansion_enabled = False
+    assert await agent._search_with_expansion(
+        {"query": "差旅和餐补分别怎么规定", "tag": "差旅报销"}
+    ) is None
 
 
 @pytest.mark.asyncio

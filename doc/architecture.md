@@ -106,18 +106,95 @@ LLM 下一轮：read_category_info(tag="财务")   ← 自己修正
 
 如果不校验，空 tag 会拼出 `references/None.md` 这样的脏文件。
 
+#### 工具名白名单（示例）
+
+**解决什么问题**：LLM 可能凭空捏造不存在的工具名（幻觉），或者被 prompt
+injection 诱导调用未注册的危险操作。
+
+```text
+LLM 调用：search_kb(query="报销流程")     ← schema 里没有这个工具
+系统回填：未知工具 search_kb，可用工具为：read_category_info,
+          search_knowledge_base, read_file, ...。请重新选择工具。
+LLM 下一轮：search_knowledge_base(query="报销流程", tag="财务")  ← 修正
+```
+
+为什么：执行前先比对白名单，防"幽灵工具"执行，也防恶意指令引导模型调用
+未注册操作——这是"最小权限"的第一道闸。
+
+#### 异常隔离（示例）
+
+**解决什么问题**：一个工具挂掉不应让整轮对话失败，也不应让用户看到"系统错误"。
+
+```text
+read_file 读取被删掉的文件 → 抛 FileNotFoundError
+系统回填：工具 read_file 执行异常：文件不存在 doc/xx.md
+LLM 下一轮：改用 list_files 查看目录，或基于已有信息回答  ← 换路径继续
+```
+
+为什么：工具执行包在 try/except 里，异常变成 tool 结果回填给 LLM，让它
+换一条路径继续，而不是中断整个对话。
+
+#### 死循环指纹检测（示例）
+
+**解决什么问题**：LLM 因为"没找到满意结果"反复用相同参数重试同一个调用，
+烧 token 且永不收敛。
+
+```text
+连续 3 次：search_knowledge_base(query="报销规则", tag="财务")（参数相同）
+第 3 次被拦截 → 回填：该工具已用相同参数连续调用多次，疑似循环。
+            请停止重复调用，直接基于已有信息回答。
+```
+
+为什么：对"工具名 + 参数序列化"算指纹，累计超过 2 次即提示——低成本且有效
+的终止手段，配合轮数上限形成双保险。（换参数但结果一样的情况由"无进展检测"
+兜住，见 Loop Engineering。）
+
+#### 动态预算截断（示例）
+
+**解决什么问题**：超长工具结果直接撑爆上下文——几轮 `read_file` 就能把
+64K 窗口填满，后续 LLM 注意力被稀释、token 成本失控。
+
+```text
+当前上下文已占 50K token，剩余预算 = 64K − 50K − 输出预留 2K − 安全 4K
+按剩余轮数均摊 → 本轮工具结果上限自动收紧（最小不低于 500 字符）
+read_file 返回 1 万字 → 先 LLM 压缩（保留关键信息），失败回退截断
+```
+
+为什么：3000 不是拍脑袋值，而是"窗口 − 当前上下文 − 预留 − 余量"的公式结果；
+上下文占用越高，上限自动越紧，防止"默认值够用但极端场景失控"。
+
 ## Loop Engineering（循环预算与收敛）
 
-配置：`config/loop_config.yaml`。ReAct 循环不是 while 循环，而是一套有预算的
-决策过程：
+配置：`config/loop_config.yaml`。参考 Claude Code queryLoop 的设计：
+主循环的正常路径很简单（有 tool_calls 就继续、没有就正常完成），真正的工作量
+在**异常退出**——每种退出都带结构化 reason，可上报、可排查。
+
+### 退出 reason 体系
 
 | 机制 | 实现 | 说明 |
 |---|---|---|
-| 终止条件三层 | LLM 直接回答 / 无进展提示 / 轮数上限（`max_rounds=5`） | 轮数上限是"预算保护"不是"路径规划"：业务上多数 2-3 轮收敛，上限只防失控 |
+| 正常完成 | LLM 无 tool_calls → `reason=completed` | 判断就是"有没有工具调用"，不做复杂意图识别（Claude 同款） |
+| 无进展退出 | 连续 N 次工具结果签名相同 → 提示 LLM 停止；下一轮仍调工具 → `reason=no_progress` | 给一次直接回答的机会，仍不收敛才止损 |
+| 轮数上限 | `max_rounds=20`（参考 Claude maxTurns：只是极端兜底） | 真正终止靠正常完成 + 无进展 + 指纹，上限只在失控时强止损 |
+| 输出截断续写 | `finish_reason=length` → 保留已生成内容 + nudge 续写，最多 3 次 → 超限 `reason=output_truncated_max` | 用户感觉不到截断（Claude maxOutputTokensRecovery 同款） |
+| 上下文超长 | API 拒收（context too long）→ 被动压缩一次重试 → 仍失败 `reason=prompt_too_long` | 与演进式摘要互补：这是"被拒后的补救"，防重复压缩标志 |
 | 动态工具结果预算 | `窗口(64K) − 当前上下文 − 输出预留(2K) − 安全余量(4K)`，按剩余轮数均摊，clamp 到 [500, 3000] | 3000 是公式结果不是拍脑袋值；上下文占用高时自动收紧 |
 | 指纹防循环 | 同工具+同参数序列化指纹，连续 >2 次提示停止 | 防"一模一样"的重复调用 |
-| 无进展检测 | 工具结果签名（检索用来源章节集合，其他用文本前缀），连续 2 次相同提示停止 | 防"换了参数但结果一样"（检索命中集合重复）——指纹管不住的部分 |
-| 各阶段 max_tokens | `llm_tokens` 段统一收口（循环 1000/摘要 400/兜底 500/Self-RAG 150/改写 100） | 消除散落代码常量 |
+| 各阶段 max_tokens | `llm_tokens` 段统一收口 | 消除散落代码常量 |
+
+### 循环状态显式管理
+
+循环内的跨轮状态全部放在 `loop_state` 字典（turn_count / fingerprints /
+last_signature / no_progress_count / no_progress_breach /
+output_recovery_count / attempted_compact），不藏在散落局部变量里——
+每轮的"现场"一目了然，防死循环的计数和防重复标志都在明处（Claude State 同款）。
+
+### 并行工具执行
+
+同轮多个 tool_calls：**只读工具**（检索/读文件/看分类）用 `asyncio.gather`
+并行执行——检索（Chroma/BM25/精排）全为只读，多路并行无冲突；
+**写工具**（write/create）串行执行（fail-closed：默认不并行，避免互相覆盖）。
+多查询分解内部的多路子查询检索同样并行。
 
 ## 兜底策略（四层框架）
 

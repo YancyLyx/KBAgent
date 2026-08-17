@@ -103,6 +103,7 @@ class AgentManager:
         _budget_cfg = self.loop_config.get("budget", {})
         self.max_loop_rounds = int(_loop_cfg.get("max_rounds", 5))
         self.no_progress_threshold = int(_loop_cfg.get("no_progress_threshold", 2))
+        self.output_recovery_max = int(_loop_cfg.get("output_recovery_max", 3))
         self.tool_result_max_chars = int(_budget_cfg.get("tool_result_max_chars", 3000))
         self.tool_result_min_chars = int(_budget_cfg.get("tool_result_min_chars", 500))
         self.summary_max_chars = int(_budget_cfg.get("summary_max_chars", 300))
@@ -118,12 +119,22 @@ class AgentManager:
             "recall_rewrite": int(
                 self.loop_config.get("llm_tokens", {}).get("recall_rewrite", 100)
             ),
+            "intent_analysis": int(
+                self.loop_config.get("llm_tokens", {}).get("intent_analysis", 150)
+            ),
         }
         self.self_rag_enabled = bool(
             self.loop_config.get("self_rag", {}).get("enabled", False)
         )
         self.self_rag_max_rounds = int(
             self.loop_config.get("self_rag", {}).get("max_rounds", 1)
+        )
+        # LLM 语义判断开关（替代硬编码关键词路由，符合 Agentic RAG 定位）
+        self.query_expansion_enabled = bool(
+            self.loop_config.get("query_expansion", {}).get("enabled", True)
+        )
+        self.intent_analysis_enabled = bool(
+            self.loop_config.get("intent_analysis", {}).get("enabled", True)
         )
         # 兜底场景标签（第二篇文章：strict 拒绝编造 / lenient 允许通用知识兜底）
         _fallback = self.loop_config.get("fallback_policy", {})
@@ -241,6 +252,7 @@ class AgentManager:
                         "query": message,
                         "answer": _cached_answer,
                         "cached": True,
+                        "reason": "cache_hit",
                         "success": True,
                         "intent": IntentType.KNOWLEDGE_QUERY.value,
                         "user_id": self.user_id,
@@ -257,18 +269,22 @@ class AgentManager:
             if history:
                 history_context = self._format_history(history)
 
+        # 1.5 意图分析（LLM 语义判断，替代硬编码关键词路由）：
+        # 一次调用同时产出"是否闲聊"（注入路由）和"指代补全后的检索 query"
+        # （记忆召回）。失败回退：按知识问题处理、用原 query——宁可多注入不丢上下文。
+        intent = None
+        if self.intent_analysis_enabled and self.rag_pipeline:
+            try:
+                intent = await self._analyze_query_intent(message)
+            except Exception:
+                intent = None
+        is_small_talk = bool(intent and intent.get("is_small_talk"))
+        recall_query = (intent or {}).get("rewritten_query") or message
+
         # 2. 注入跨会话语义回忆（检索该用户历史对话中最相关的片段）
         recall_messages = ""
         if self.conversation_memory and self.user_id:
             try:
-                # 指代查询先做改写（"那个方案"→具体实体），提升语义召回命中率；
-                # 只有命中指代词才触发（低频低成本），失败回退原查询
-                recall_query = message
-                if self._may_contain_reference(message):
-                    try:
-                        recall_query = await self._rewrite_query_for_recall(message)
-                    except Exception:
-                        recall_query = message
                 # Chroma 查询 + embedding 都是同步调用，丢线程池执行
                 recall = await asyncio.to_thread(
                     self.conversation_memory.semantic_recall,
@@ -297,9 +313,9 @@ class AgentManager:
         user_context = ""
         if self.long_memory and self.user_id:
             try:
-                # 注入路由：纯闲聊不需要用户画像/演进式摘要（省 token，
-                # 也避免闲聊被记忆带偏）；知识/业务类问题才注入
-                if not self._is_small_talk(message):
+                # 注入路由：LLM 意图分析判定为闲聊时，不注入用户画像/演进式摘要
+                # （省 token，也避免闲聊被记忆带偏）；知识/业务类问题才注入
+                if not is_small_talk:
                     # 偏好时间线注入：当前生效偏好（完整历史经状态过滤），
                     # 交 LLM 综合判断矛盾，发现矛盾先澄清再回答
                     from ..memory.pref_store import get_active
@@ -338,13 +354,30 @@ class AgentManager:
         if self.tool_router and self.enable_tools and self.skill_manager:
             tools = self.tool_router.get_tool_schemas()
 
-        # 6. ReAct 循环：推理 → 执行 → 观察 → 再推理，直到 LLM 直接回答
+        # 6. ReAct 循环：推理 → 执行 → 观察 → 再推理，直到 LLM 直接回答。
+        #    参考 Claude Code queryLoop 的设计：
+        #    - 正常终止：LLM 无 tool_calls → reason=completed
+        #    - 异常终止：无进展（no_progress）/ 轮数上限（max_turns）/
+        #      输出截断续写失败（output_truncated_max）/ 上下文超长（prompt_too_long）
+        #    - 循环状态显式管理（loop_state），不藏在散落变量里（可调试）
         response_data = {
             "query": message,
             "intent": IntentType.KNOWLEDGE_QUERY.value,
             "user_id": self.user_id,
         }
         last_tool_result = ""  # 兜底/统计复用，先初始化避免作用域问题
+        loop_state = {
+            "turn_count": 0,
+            "fingerprints": {},       # 死循环检测：同工具+同参数连续 >2 次
+            "last_signature": None,   # 无进展检测：上一轮工具结果签名
+            "no_progress_count": 0,
+            "no_progress_breach": False,  # 已提示停止重复，下一轮仍调工具则退出
+            "output_recovery_count": 0,   # 输出截断续写次数
+            "attempted_compact": False,   # 本轮是否已被动压缩过（防重复压）
+        }
+        reason = "error"
+        answer = ""
+        accumulated_answer = ""  # 输出截断续写时累积各轮内容（最终返回完整输出）
 
         try:
             if not self.rag_pipeline or not self.rag_pipeline.llm_client:
@@ -355,11 +388,6 @@ class AgentManager:
             react_messages = list(messages)
             last_tool_name = None
             last_tool_args = None
-            # 死循环检测：同一工具 + 同一参数连续调用超过 2 次 → 中断
-            tool_call_fingerprints: Dict[str, int] = {}
-            # 无进展检测：换了参数但结果基本相同（检索命中集合重复）也算无进展
-            last_result_signature = None
-            no_progress_count = 0
             # 工具白名单：LLM 可能输出幻觉工具名，先校验再执行
             known_tool_names = (
                 set(self.tool_router.get_tool_names())
@@ -367,39 +395,38 @@ class AgentManager:
             )
 
             for iteration in range(self.max_loop_rounds):
-                if stream_callback is not None:
-                    stream = await llm_client.chat.completions.create(
-                        model=llm_model,
-                        messages=react_messages,
-                        tools=tools if tools else None,
-                        tool_choice="auto" if tools else None,
-                        temperature=0.7,
-                        max_tokens=self.llm_tokens["react_loop"],
-                        stream=True,
+                loop_state["turn_count"] = iteration + 1
+                msg, finish_reason, _ = await self._call_llm_for_loop(
+                    llm_client, llm_model, react_messages, tools,
+                    stream_callback, loop_state, iteration,
+                )
+
+                # 无进展 breach：上一轮已提示"停止重复检索"，LLM 仍要调工具 →
+                # 判定循环无进展，异常退出（已给它一次直接回答的机会）
+                if (
+                    loop_state["no_progress_breach"]
+                    and msg.tool_calls
+                    and tools
+                ):
+                    answer = (
+                        "已连续多次检索到相同结果，未获得新信息。"
+                        "请换一种问法，或补充更多细节后重试。"
                     )
-                    msg = await self._collect_stream_message(stream, stream_callback)
-                else:
-                    response = await llm_client.chat.completions.create(
-                        model=llm_model,
-                        messages=react_messages,
-                        tools=tools if tools else None,
-                        tool_choice="auto" if tools else None,
-                        temperature=0.7,
-                        max_tokens=self.llm_tokens["react_loop"],
-                    )
-                    msg = response.choices[0].message
+                    reason = "no_progress"
+                    break
 
                 if msg.tool_calls and tools:
                     # 统一转成 OpenAI 消息 dict：流式聚合出的是 SimpleNamespace，
                     # 不能直接回填（SDK 序列化会报错）；非流式 SDK 对象也兼容此转换
                     react_messages.append(self._assistant_message_from(msg))
-                    round_has_valid_call = False
+                    # 第一遍（顺序）：白名单 / 参数解析 / 指纹防循环，
+                    # 失败的直接回填错误让 LLM 修正，不进入执行
+                    validated = []
                     for tc in msg.tool_calls:
                         func_name = tc.function.name
 
                         # 0) 工具名白名单校验（幻觉工具名 → 回填错误让 LLM 修正）
                         if known_tool_names and func_name not in known_tool_names:
-                            round_has_valid_call = True
                             react_messages.append({
                                 "role": "tool",
                                 "tool_call_id": tc.id,
@@ -420,11 +447,10 @@ class AgentManager:
                         except (TypeError, ValueError):
                             _fp = str(func_args)
                         _fingerprint = f"{func_name}:{_fp}"
-                        tool_call_fingerprints[_fingerprint] = (
-                            tool_call_fingerprints.get(_fingerprint, 0) + 1
+                        loop_state["fingerprints"][_fingerprint] = (
+                            loop_state["fingerprints"].get(_fingerprint, 0) + 1
                         )
-                        if tool_call_fingerprints[_fingerprint] > 2:
-                            round_has_valid_call = True
+                        if loop_state["fingerprints"][_fingerprint] > 2:
                             react_messages.append({
                                 "role": "tool",
                                 "tool_call_id": tc.id,
@@ -437,7 +463,6 @@ class AgentManager:
 
                         # 3) 参数解析失败 → 回填错误，让 LLM 自行修正（不中断循环）
                         if not parse_ok:
-                            round_has_valid_call = True
                             react_messages.append({
                                 "role": "tool",
                                 "tool_call_id": tc.id,
@@ -449,110 +474,127 @@ class AgentManager:
                             })
                             continue
 
-                        # 4) 执行工具（异常隔离：单个工具抛错不中断整个对话）
-                        try:
-                            tool_calls_count += 1
-                            if func_name == "search_knowledge_base":
-                                # 复杂查询：先多查询分解 + HyDE 增强检索，失败走原路径
-                                expanded = await self._search_with_expansion(func_args)
-                                if expanded is not None:
-                                    tool_result = expanded
-                                elif self.self_rag_enabled:
-                                    # Self-RAG：检索后 LLM 判断充分性，不足则改写再检
-                                    self_rag_result = await self._search_with_self_rag(func_args)
-                                    if self_rag_result is not None:
-                                        tool_result = self_rag_result
-                                    else:
-                                        tool_result = await asyncio.to_thread(
-                                            self.tool_router.call_skill_tool, func_name, func_args
-                                        )
+                        validated.append((tc.id, func_name, func_args))
+
+                    if validated:
+                        # 第二遍（并行）：只读工具 asyncio.gather 并行，写工具串行
+                        tool_results, tool_failures = await self._execute_tools(
+                            validated, message
+                        )
+                        tool_calls_count += len(validated)
+                        tool_failures_count += tool_failures
+
+                        # 第三遍（顺序）：预算压缩 / 空结果兜底 / 无进展检测 / 回填
+                        for tc_id, func_name, func_args in validated:
+                            tool_result = tool_results.get(tc_id, "")
+
+                            # 4.5) 检索空结果兜底（四层框架）：记录失败 query、
+                            # 低相关候选、strict/lenient 场景话术
+                            if (
+                                func_name == "search_knowledge_base"
+                                and "未找到相关内容" in tool_result
+                            ):
+                                tool_result = await self._handle_missed_retrieval(
+                                    # 记录/抢救用用户原始问题：知识库盲区分析
+                                    # 面向的是"用户问什么"，而不是 LLM 改写后的工具参数
+                                    message,
+                                    str(func_args.get("tag", "")),
+                                    tool_result,
+                                )
+
+                            # 5) 上下文预算：动态计算本轮工具结果上限，
+                            #    超过先 LLM 压缩，失败回退截断
+                            _current_chars = sum(
+                                len(m.get("content") or "")
+                                + sum(
+                                    len(tc_.get("function", {}).get("arguments", "") or "")
+                                    for tc_ in (m.get("tool_calls") or [])
+                                )
+                                for m in react_messages
+                            )
+                            budget_chars = self._compute_tool_result_budget(
+                                _current_chars,
+                                self.max_loop_rounds - iteration,
+                                self.budget_config,
+                            )
+                            if len(tool_result) > budget_chars:
+                                compressed = await self._compress_tool_result(
+                                    message, tool_result, max_chars=budget_chars
+                                )
+                                if compressed:
+                                    tool_result = compressed + "\n...[内容过长已压缩]"
                                 else:
-                                    tool_result = await asyncio.to_thread(
-                                        self.tool_router.call_skill_tool, func_name, func_args
+                                    tool_result = (
+                                        tool_result[:budget_chars]
+                                        + "\n...[内容过长已截断]"
                                     )
-                            else:
-                                # 工具内部包含检索+精排（同步 CPU/本地 IO），丢线程池执行
-                                tool_result = await asyncio.to_thread(
-                                    self.tool_router.call_skill_tool, func_name, func_args
-                                )
-                        except Exception as e:
-                            tool_failures_count += 1
-                            tool_result = f"工具 {func_name} 执行异常：{e}"
 
-                        # 4.5) 检索空结果兜底（四层框架）：记录失败 query（系统层）、
-                        # 低相关候选（交互层）、strict/lenient 场景话术（生成层）
-                        if (
-                            func_name == "search_knowledge_base"
-                            and "未找到相关内容" in tool_result
-                        ):
-                            tool_result = await self._handle_missed_retrieval(
-                                # 记录/抢救用用户原始问题：知识库盲区分析
-                                # 面向的是"用户问什么"，而不是 LLM 改写后的工具参数
-                                message,
-                                str(func_args.get("tag", "")),
-                                tool_result,
-                            )
+                            # 6) 无进展检测：结果签名与上一轮相同 → 计数；
+                            #    连续达到阈值 → 回填提示 + breach 标志（下一轮
+                            #    若仍调工具则强制退出）。签名变化时重置计数与 breach
+                            _sig = self._tool_result_signature(func_name, tool_result)
+                            if _sig:
+                                if _sig == loop_state["last_signature"]:
+                                    loop_state["no_progress_count"] += 1
+                                else:
+                                    loop_state["no_progress_count"] = 0
+                                    loop_state["no_progress_breach"] = False
+                                loop_state["last_signature"] = _sig
+                                if (
+                                    loop_state["no_progress_count"]
+                                    >= self.no_progress_threshold
+                                ):
+                                    loop_state["no_progress_breach"] = True
+                                    tool_result += (
+                                        "\n\n[系统提示] 本轮检索/工具结果与上一轮基本相同，"
+                                        "未获得新信息。请停止重复检索，直接基于已有信息回答，"
+                                        "或换一个更具体/不同角度的查询词重新检索。"
+                                    )
 
-                        # 5) 上下文预算：按"窗口 − 当前上下文 − 输出预留 − 安全余量"
-                        #    动态计算本轮工具结果上限，超过先 LLM 压缩，失败回退截断
-                        _current_chars = sum(
-                            len(m.get("content") or "")
-                            + sum(
-                                len(tc.get("function", {}).get("arguments", "") or "")
-                                for tc in (m.get("tool_calls") or [])
-                            )
-                            for m in react_messages
-                        )
-                        budget_chars = self._compute_tool_result_budget(
-                            _current_chars,
-                            self.max_loop_rounds - iteration,
-                            self.budget_config,
-                        )
-                        if len(tool_result) > budget_chars:
-                            compressed = await self._compress_tool_result(
-                                message, tool_result, max_chars=budget_chars
-                            )
-                            if compressed:
-                                tool_result = compressed + "\n...[内容过长已压缩]"
-                            else:
-                                tool_result = tool_result[:budget_chars] + "\n...[内容过长已截断]"
+                            react_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc_id,
+                                "content": tool_result,
+                            })
+                            last_tool_name = func_name
+                            last_tool_args = func_args
+                            last_tool_result = tool_result
+                    continue
 
-                        # 6) 无进展检测：结果签名与上一轮相同 → 计数；连续达到阈值
-                        #    则追加系统提示，让 LLM 停止重复检索（指纹防"同参数"，
-                        #    无进展防"换参数但结果一样"，两层互补）
-                        _sig = self._tool_result_signature(func_name, tool_result)
-                        if _sig:
-                            if _sig == last_result_signature:
-                                no_progress_count += 1
-                            else:
-                                no_progress_count = 0
-                            last_result_signature = _sig
-                            if no_progress_count >= self.no_progress_threshold:
-                                tool_result += (
-                                    "\n\n[系统提示] 本轮检索/工具结果与上一轮基本相同，"
-                                    "未获得新信息。请停止重复检索，直接基于已有信息回答，"
-                                    "或换一个更具体/不同角度的查询词重新检索。"
-                                )
-
-                        round_has_valid_call = True
-                        react_messages.append({
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": tool_result,
-                        })
-                        last_tool_name = func_name
-                        last_tool_args = func_args
-                        last_tool_result = tool_result
-                    if round_has_valid_call:
-                        continue
-
+                # LLM 直接回答（无 tool_calls）→ 正常终止，但检查输出是否被截断
                 answer = msg.content or ""
+                if finish_reason == "length" and answer:
+                    # 输出截断续写（nudge）：已生成内容保留为 assistant 消息，
+                    # 追加提示让模型从断点续写；计数超限则退出（防死循环）
+                    accumulated_answer += answer
+                    loop_state["output_recovery_count"] += 1
+                    if loop_state["output_recovery_count"] > self.output_recovery_max:
+                        answer = accumulated_answer + (
+                            "\n\n[系统提示] 输出长度限制多次触发，已返回当前内容。"
+                        )
+                        reason = "output_truncated_max"
+                        break
+                    react_messages.append({"role": "assistant", "content": answer})
+                    react_messages.append({
+                        "role": "user",
+                        "content": (
+                            "（系统提示：上次输出因长度限制被截断。"
+                            "请从断点直接续写，不要重复或总结已输出内容，不要道歉，"
+                            "把剩余内容拆成更小的块继续输出。）"
+                        ),
+                    })
+                    continue
+                if accumulated_answer:
+                    answer = accumulated_answer + (answer or "")
+                reason = "completed"
                 break
             else:
                 answer = "已达到最大推理轮次，请简化您的问题。"
+                reason = "max_turns"
 
             response_data.update({
                 "answer": answer,
+                "reason": reason,
                 "tool_used": last_tool_name,
                 "tool_args": last_tool_args,
                 "success": True,
@@ -567,6 +609,11 @@ class AgentManager:
             response_data.update({
                 "answer": f"抱歉，处理请求时出现错误：{str(e)}",
                 "error": str(e),
+                "reason": (
+                    "prompt_too_long"
+                    if loop_state.get("attempted_compact")
+                    else "error"
+                ),
                 "success": False,
             })
 
@@ -762,11 +809,15 @@ class AgentManager:
         """
         content_parts = []
         tool_calls_agg: Dict[int, Dict[str, str]] = {}
+        finish_reason = None
 
         async for chunk in stream:
             if not chunk.choices:
                 continue
-            delta = chunk.choices[0].delta
+            choice = chunk.choices[0]
+            if getattr(choice, "finish_reason", None):
+                finish_reason = choice.finish_reason
+            delta = choice.delta
             if delta is None:
                 continue
             if delta.content:
@@ -793,8 +844,12 @@ class AgentManager:
                 )
                 for _, agg in sorted(tool_calls_agg.items())
             ]
-            return SimpleNamespace(content=None, tool_calls=calls)
-        return SimpleNamespace(content="".join(content_parts), tool_calls=None)
+            return SimpleNamespace(
+                content=None, tool_calls=calls, finish_reason=finish_reason
+            )
+        return SimpleNamespace(
+            content="".join(content_parts), tool_calls=None, finish_reason=finish_reason
+        )
 
     @staticmethod
     def _assistant_message_from(msg) -> dict:
@@ -819,39 +874,162 @@ class AgentManager:
             }
         return {"role": "assistant", "content": getattr(msg, "content", "") or ""}
 
+    # 只读工具集合：可并行执行（检索/读文件互不干扰）；
+    # 写工具（write/create）必须串行，fail-closed 默认不并行
+    READ_ONLY_TOOLS = frozenset({
+        "search_knowledge_base", "read_category_info", "read_file", "list_files",
+    })
+
+    @staticmethod
+    def _is_context_too_long_error(e: Exception) -> bool:
+        """识别"上下文超长"类错误（OpenAI SDK 抛 BadRequestError，消息含关键词）"""
+        text = str(e).lower()
+        markers = (
+            "maximum context length", "context length", "prompt is too long",
+            "too many tokens", "token limit", "context_length_exceeded",
+        )
+        return any(m in text for m in markers)
+
+    @staticmethod
+    def _compact_messages_for_retry(messages: list, keep_recent: int = 4) -> list:
+        """被动上下文压缩：保留全部 system 消息 + 最近 N 条非 system 消息。
+
+        与演进式摘要（主动压缩）互补：这是"API 拒收后的被动补救"，
+        只压一次（attempted_compact 防重复），对应 Claude 的
+        hasAttemptedReactiveCompact。
+        """
+        system_msgs = [m for m in messages if m.get("role") == "system"]
+        others = [m for m in messages if m.get("role") != "system"]
+        return system_msgs + others[-keep_recent:]
+
+    async def _call_llm_for_loop(
+        self,
+        llm_client,
+        llm_model: str,
+        react_messages: list,
+        tools: list,
+        stream_callback,
+        loop_state: dict,
+        iteration: int,
+    ) -> tuple:
+        """调模型（流式/非流式），带上下文超长被动压缩重试。
+
+        Returns:
+            (msg, finish_reason, messages_after_compact)：
+            messages_after_compact 为压缩后的消息列表（未压缩时为原列表）。
+            上下文超长且压缩后仍失败时抛异常，由外层判定 reason=prompt_too_long。
+        """
+        async def _create():
+            if stream_callback is not None:
+                stream = await llm_client.chat.completions.create(
+                    model=llm_model,
+                    messages=react_messages,
+                    tools=tools if tools else None,
+                    tool_choice="auto" if tools else None,
+                    temperature=0.7,
+                    max_tokens=self.llm_tokens["react_loop"],
+                    stream=True,
+                )
+                msg = await self._collect_stream_message(stream, stream_callback)
+            else:
+                response = await llm_client.chat.completions.create(
+                    model=llm_model,
+                    messages=react_messages,
+                    tools=tools if tools else None,
+                    tool_choice="auto" if tools else None,
+                    temperature=0.7,
+                    max_tokens=self.llm_tokens["react_loop"],
+                )
+                msg = response.choices[0].message
+            finish = getattr(msg, "finish_reason", None)
+            if finish is None and stream_callback is None:
+                finish = getattr(response.choices[0], "finish_reason", None)
+            return msg, finish, react_messages
+
+        try:
+            return await _create()
+        except Exception as e:
+            if loop_state.get("attempted_compact") or not self._is_context_too_long_error(e):
+                raise
+            # 被动压缩一次后重试（同一轮内不重复压，防"压缩→仍超长→再压缩"死循环）
+            loop_state["attempted_compact"] = True
+            compacted = self._compact_messages_for_retry(react_messages)
+            if len(compacted) >= len(react_messages):
+                raise
+            react_messages[:] = compacted
+            return await _create()
+
+    async def _execute_one_tool(
+        self, func_name: str, func_args: dict, message: str
+    ) -> str:
+        """执行单个工具（异常隔离）：检索走增强路径，其余丢线程池。"""
+        try:
+            if func_name == "search_knowledge_base":
+                # 复杂查询：先多查询分解 + HyDE 增强检索，失败走原路径
+                expanded = await self._search_with_expansion(func_args)
+                if expanded is not None:
+                    return expanded
+                if self.self_rag_enabled:
+                    self_rag_result = await self._search_with_self_rag(func_args)
+                    if self_rag_result is not None:
+                        return self_rag_result
+                return await asyncio.to_thread(
+                    self.tool_router.call_skill_tool, func_name, func_args
+                )
+            # 工具内部包含检索+精排（同步 CPU/本地 IO），丢线程池执行
+            return await asyncio.to_thread(
+                self.tool_router.call_skill_tool, func_name, func_args
+            )
+        except Exception as e:
+            return f"工具 {func_name} 执行异常：{e}"
+
+    async def _execute_tools(
+        self, calls: list, message: str
+    ) -> tuple:
+        """并行执行工具：只读工具 asyncio.gather 并行，写工具串行（fail-closed）。
+
+        calls: [(tool_call_id, func_name, func_args), ...]
+        Returns: ({tool_call_id: tool_result}, failures_count)
+
+        检索（Chroma/BM25/rerank）全为只读，多路并行无冲突；
+        写工具（write/create）改动文件，必须串行避免互相覆盖。
+        """
+        results: Dict[str, str] = {}
+        read_tasks = []
+        write_calls = []
+        for tc_id, func_name, func_args in calls:
+            if func_name in self.READ_ONLY_TOOLS:
+                read_tasks.append((
+                    tc_id,
+                    self._execute_one_tool(func_name, func_args, message),
+                ))
+            else:
+                write_calls.append((tc_id, func_name, func_args))
+
+        if read_tasks:
+            gathered = await asyncio.gather(
+                *(task for _, task in read_tasks),
+                return_exceptions=True,
+            )
+            for (tc_id, _), result in zip(read_tasks, gathered):
+                results[tc_id] = (
+                    result if isinstance(result, str)
+                    else f"工具执行异常：{result}"
+                )
+
+        # 写工具串行执行（fail-closed：默认不并行）
+        for tc_id, func_name, func_args in write_calls:
+            results[tc_id] = await self._execute_one_tool(
+                func_name, func_args, message
+            )
+        failures = sum(
+            1 for r in results.values() if r.startswith("工具")
+        )
+        return results, failures
+
     # 工具结果压缩上限默认值（实际值以 config/loop_config.yaml 的 budget 段为准；
     # 保留类常量是为了向后兼容与单测构造，运行期一律用 self.tool_result_max_chars）
     MAX_TOOL_RESULT_CHARS = 3000
-
-    # 指代/模糊表述标记：命中才触发查询改写，避免每次召回都多一次 LLM 调用
-    REFERENCE_MARKERS = (
-        "上次", "之前", "刚才", "那个", "这个",
-        "它", "后来", "说过", "提到", "记得",
-    )
-
-    # 纯闲聊标记：命中则跳过画像/摘要注入（轻量路由，不做 LLM 判断）
-    SMALL_TALK_PHRASES = {
-        "你好", "您好", "你好啊", "您好啊", "嗨", "哈喽", "hello", "hi",
-        "谢谢", "感谢", "再见", "拜拜", "在吗", "你是谁", "介绍一下你自己",
-        "你能做什么", "你会什么", "谢谢你的回答",
-    }
-
-    @staticmethod
-    def _is_small_talk(query: str) -> bool:
-        """轻量判断是否为纯闲聊（去标点后匹配常见问候/寒暄）"""
-        normalized = re.sub(r"[\s，。！？!?,.、]+", "", query or "").strip().lower()
-        if normalized in AgentManager.SMALL_TALK_PHRASES:
-            return True
-        # 短问候开头（如"你好，在吗"）也视为闲聊
-        return (
-            len(normalized) <= 6
-            and any(normalized.startswith(p) for p in ("你好", "您好", "嗨", "hi", "hello"))
-        )
-
-    @staticmethod
-    def _may_contain_reference(query: str) -> bool:
-        """轻量检测查询是否可能含指代（零成本，命中才触发 LLM 改写）"""
-        return any(m in query for m in AgentManager.REFERENCE_MARKERS)
 
     async def _compress_tool_result(
         self, query: str, tool_result: str, max_chars: Optional[int] = None
@@ -1098,32 +1276,35 @@ class AgentManager:
         return {}
 
     async def _search_with_expansion(self, args: dict) -> Optional[str]:
-        """复杂查询增强检索：分解子查询 + HyDE 假设文档，多路检索合并去重。
+        """复杂查询增强检索：LLM 判断是否拆分 + HyDE 假设文档，多路检索合并去重。
 
         Returns:
             合并后的格式化结果；无需增强/失败返回 None（走原单次检索路径）。
         """
         try:
-            if not self.rag_pipeline or not self.rag_pipeline.llm_client:
+            if (
+                not self.query_expansion_enabled
+                or not self.rag_pipeline
+                or not self.rag_pipeline.llm_client
+            ):
                 return None
             query = str(args.get("query", "")).strip()
             tag = str(args.get("tag", "")).strip()
             if not query or not tag:
                 return None
-            expand_chars = int(
-                self.loop_config.get("query_expansion", {}).get(
-                    "max_chars_trigger", 25
-                )
-            )
-            if not self._should_expand_query(query, expand_chars):
-                return None
 
             from ..rag.query_expansion import decompose_query, generate_hypothetical_doc
 
+            # LLM 语义判断：拆不拆交给模型，不靠关键词规则。
+            # 返回 [原 query] 表示判断"无需拆分"→ 走原单次检索路径
             sub_queries = await decompose_query(
                 self.rag_pipeline.llm_client, self.rag_pipeline.llm_model, query
             )
+            if not sub_queries or sub_queries == [query]:
+                return None
+            # 原 query 始终保留（最忠实用户意图），子查询补充覆盖
             candidates = [query] + [q for q in sub_queries if q != query]
+            candidates = list(dict.fromkeys(candidates))
             hyde = await generate_hypothetical_doc(
                 self.rag_pipeline.llm_client, self.rag_pipeline.llm_model, query
             )
@@ -1131,10 +1312,20 @@ class AgentManager:
                 candidates.append(hyde)
 
             merged: Dict[str, Dict] = {}
-            for q in candidates:
-                ctxs = await asyncio.to_thread(
-                    self.rag_pipeline.retrieve, q, 3, True, tag
-                )
+            # 多路检索并行：子查询彼此独立、检索全为只读（Chroma/BM25/精排），
+            # asyncio.gather 并发执行，任一失败不影响其他路
+            gathered = await asyncio.gather(
+                *(
+                    asyncio.to_thread(
+                        self.rag_pipeline.retrieve, q, 3, True, tag
+                    )
+                    for q in candidates
+                ),
+                return_exceptions=True,
+            )
+            for ctxs in gathered:
+                if not isinstance(ctxs, list):
+                    continue
                 for ctx in ctxs:
                     key = ctx.get("content", "")
                     if key and key not in merged:
@@ -1155,38 +1346,55 @@ class AgentManager:
         except Exception:
             return None
 
-    @staticmethod
-    def _should_expand_query(query: str, max_chars_trigger: int = 25) -> bool:
-        """规则触发多查询增强：问题含多主题词或较长（长度阈值可配置）"""
-        markers = ("分别", "对比", "以及", "哪些", "所有", "不同", "各")
-        return any(m in query for m in markers) or len(query) > max_chars_trigger
+    async def _analyze_query_intent(self, query: str) -> dict:
+        """LLM 意图分析：一次调用判断"是否闲聊" + "是否有指代需补全"。
 
-    async def _rewrite_query_for_recall(self, query: str) -> str:
-        """查询改写/指代补全：把"那个方案"补全成具体实体。
+        替代硬编码关键词路由（SMALL_TALK_PHRASES / REFERENCE_MARKERS）：
+        语义判断交给 LLM，符合 Agentic RAG 的定位。
 
-        向量检索对"无实体词的纯指代"会失效（三条记忆相似度几乎相同），
-        先用 LLM 把指代补全成明确实体再检索；失败/无 LLM 时回退原查询。
+        Returns:
+            {"is_small_talk": bool, "rewritten_query": str}；失败回退
+            {"is_small_talk": False, "rewritten_query": query}
+            （宁可按知识问题处理，不丢上下文）。
         """
+        fallback = {"is_small_talk": False, "rewritten_query": query}
         if not self.rag_pipeline or not self.rag_pipeline.llm_client:
-            return query
+            return fallback
         prompt = (
-            "用户的问题里可能包含指代（如「那个方案」「之前说的」），"
-            "请把它补全成一句明确的、可用于检索历史对话的查询。"
-            "只输出补全后的查询，不要任何解释或多余标点。\n\n"
-            f"原问题：{query}\n\n补全后："
+            "分析用户输入，只输出 JSON：\n"
+            '{"is_small_talk": true/false, "rewritten_query": "..."}\n'
+            "判断标准：\n"
+            "1. is_small_talk：是否只是问候/寒暄/闲聊（不涉及知识库业务问题）。"
+            "例如「你好」「谢谢」「你是谁」为 true；「报销流程是什么」为 false。\n"
+            "2. rewritten_query：如果输入包含指代（如「那个方案」「上次说的」「它」），"
+            "补全成一句明确的、可用于检索历史对话的查询；"
+            "如果没有指代，原样输出原输入。\n\n"
+            f"用户输入：{query}"
         )
         try:
             resp = await self.rag_pipeline.llm_client.chat.completions.create(
                 model=self.rag_pipeline.llm_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
-                max_tokens=self.llm_tokens["recall_rewrite"],
+                max_tokens=self.llm_tokens.get("intent_analysis", 150),
             )
-            rewritten = (resp.choices[0].message.content or "").strip()
-            return rewritten or query
+            raw = (resp.choices[0].message.content or "").strip()
+            data = self._parse_json_loose(raw)
+            rewritten = str(data.get("rewritten_query") or "").strip()
+            # bool("false") 在 Python 里是 True，必须严格解析字符串布尔
+            raw_flag = data.get("is_small_talk", False)
+            if isinstance(raw_flag, bool):
+                is_small_talk = raw_flag
+            else:
+                is_small_talk = (
+                    str(raw_flag).strip().lower() in ("true", "1", "yes")
+                )
+            return {
+                "is_small_talk": is_small_talk,
+                "rewritten_query": rewritten or query,
+            }
         except Exception:
-            # LLM 不可用/改写失败 → 回退原查询，不让回忆链路挂掉
-            return query
+            return fallback
 
     @staticmethod
     def summary_due(turn_count: int, summary_window: int) -> bool:

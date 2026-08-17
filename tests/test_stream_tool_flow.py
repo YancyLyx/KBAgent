@@ -134,6 +134,9 @@ def _make_agent():
     agent.tool_router.skill_pipeline = SimpleNamespace(
         retrieve=lambda *a, **k: [{"content": "行权期为 3 年", "section": "第四章"}]
     )
+    # 本测试聚焦流式工具链路，关闭 LLM 意图分析/查询增强避免额外调用干扰计数
+    agent.intent_analysis_enabled = False
+    agent.query_expansion_enabled = False
     return agent
 
 

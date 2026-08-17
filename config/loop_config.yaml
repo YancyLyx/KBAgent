@@ -10,10 +10,14 @@
 #    "换了参数但结果一样"（检索命中的文档集合重复）。
 
 loop:
-  # ReAct 循环轮数上限
-  max_rounds: 5
+  # ReAct 循环轮数上限（参考 Claude Code maxTurns：只是"极端兜底"，不是主终止
+  # 机制；RAG 系统循环成本可接受，真正终止靠 LLM 直接回答 + 无进展检测 +
+  # 指纹防循环，上限只在失控时强止损）
+  max_rounds: 20
   # 连续多少次"结果与上一轮基本相同"判定为无进展（≥2 时强制 LLM 直接回答）
   no_progress_threshold: 2
+  # 输出截断续写（nudge）最多几次，超限退出 reason=output_truncated_max
+  output_recovery_max: 3
 
 budget:
   # 模型上下文窗口（DeepSeek deepseek-chat 官方 64K；deepseek-reasoner 128K）
@@ -39,7 +43,8 @@ llm_tokens:
   summary: 400           # 演进式摘要 + 画像提取
   fallback: 500          # 低分兜底重答
   self_rag_judge: 150    # Self-RAG 检索充分性判断
-  recall_rewrite: 100    # 指代查询改写
+  recall_rewrite: 100    # 指代查询改写（保留兼容，实际并入意图分析）
+  intent_analysis: 150   # LLM 意图分析（闲聊判断 + 指代补全，一次调用）
 
 # Self-RAG：检索后 LLM 判断"片段是否足够回答"，不足则改写查询再检一次
 # 默认关闭：每次检索多一次 LLM 调用，按需开启（Advanced RAG 增强的统一策略）
@@ -47,9 +52,13 @@ self_rag:
   enabled: false
   max_rounds: 1  # 最多补检几次
 
-# 多查询分解 + HyDE 增强检索的触发阈值（与 _should_expand_query 对齐）
+# 多查询分解 + HyDE 增强检索：拆不拆由 LLM 语义判断（无硬编码关键词）
 query_expansion:
-  max_chars_trigger: 25
+  enabled: true
+
+# LLM 意图分析：是否闲聊（注入路由）+ 指代补全（记忆召回），一次调用完成
+intent_analysis:
+  enabled: true
 
 # 兜底场景标签（检索不到时的生成层边界）：
 # - strict_tags：检索不到时明确告知未找到，不得用模型知识编造（默认严格）

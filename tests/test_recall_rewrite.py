@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
-"""查询改写（指代补全）测试
+"""LLM 意图分析测试（闲聊判断 + 指代补全，一次调用）
 
-背景：向量检索对"无实体词的纯指代"（如"那个方案后来怎么样了"）会失效——
-三条历史记忆的相似度几乎相同，分不出哪条是"那个方案"。
-方案：检索前用 LLM 把指代补全成明确实体；只有命中指代词才触发（低频低成本），
-失败回退原查询。
+背景：语义判断交给 LLM 而非硬编码关键词——向量检索对"无实体词的纯指代"
+（如"那个方案后来怎么样了"）会失效，需要 LLM 补全；是否闲聊也由 LLM 判断
+（注入路由用）。
 """
 
 import sys
@@ -49,24 +48,52 @@ def _agent_with_fake_llm(content="JWT 认证方案部署进展"):
     return agent
 
 
-def test_may_contain_reference():
-    """指代检测：含指代词触发，正常查询不触发"""
-    assert AgentManager._may_contain_reference("上次说的那个认证方案")
-    assert AgentManager._may_contain_reference("那个方案后来怎么样了")
-    assert AgentManager._may_contain_reference("我之前提到的问题")
-    assert not AgentManager._may_contain_reference("报销流程是什么")
-    assert not AgentManager._may_contain_reference("员工持股计划的行权期")
+def test_intent_analysis_reference_rewrite():
+    """意图分析：LLM 把指代补全成明确实体，且判定非闲聊"""
+    agent = _agent_with_fake_llm(
+        content='{"is_small_talk": false, "rewritten_query": "JWT 认证方案部署进展"}'
+    )
+    result = asyncio.run(agent._analyze_query_intent("那个方案后来怎么样了"))
+    assert result["is_small_talk"] is False
+    assert result["rewritten_query"] == "JWT 认证方案部署进展"
 
 
-def test_rewrite_query_for_recall():
-    """改写：LLM 把指代补全成明确实体"""
-    agent = _agent_with_fake_llm(content="JWT 认证方案部署进展")
-    result = asyncio.run(agent._rewrite_query_for_recall("那个方案后来怎么样了"))
-    assert result == "JWT 认证方案部署进展"
+def test_intent_analysis_small_talk():
+    """意图分析：问候判定为闲聊，改写保持原样"""
+    agent = _agent_with_fake_llm(
+        content='{"is_small_talk": true, "rewritten_query": "你好"}'
+    )
+    result = asyncio.run(agent._analyze_query_intent("你好"))
+    assert result["is_small_talk"] is True
+    assert result["rewritten_query"] == "你好"
 
 
-def test_rewrite_fallback_on_error():
-    """改写失败：回退原查询，不让回忆链路挂掉"""
+def test_intent_analysis_no_reference_keeps_query():
+    """意图分析：无指代时 rewritten_query 原样输出"""
+    agent = _agent_with_fake_llm(
+        content='{"is_small_talk": false, "rewritten_query": "报销流程是什么"}'
+    )
+    result = asyncio.run(agent._analyze_query_intent("报销流程是什么"))
+    assert result["rewritten_query"] == "报销流程是什么"
+
+
+def test_intent_analysis_string_boolean_parsed_strictly():
+    """LLM 返回字符串布尔（"false"）不能被 Python 的 truthiness 误判"""
+    agent = _agent_with_fake_llm(
+        content='{"is_small_talk": "false", "rewritten_query": "报销流程是什么"}'
+    )
+    result = asyncio.run(agent._analyze_query_intent("报销流程是什么"))
+    assert result["is_small_talk"] is False
+
+    agent2 = _agent_with_fake_llm(
+        content='{"is_small_talk": "true", "rewritten_query": "你好"}'
+    )
+    result2 = asyncio.run(agent2._analyze_query_intent("你好"))
+    assert result2["is_small_talk"] is True
+
+
+def test_intent_fallback_on_error():
+    """意图分析失败：回退为"非闲聊 + 原查询"（宁可按知识问题处理，不丢上下文）"""
     agent = _agent_with_fake_llm()
 
     class FailCompletions:
@@ -82,12 +109,12 @@ def test_rewrite_fallback_on_error():
     agent.rag_pipeline = type(
         "P", (), {"llm_client": FakeClient(), "llm_model": "fake-model"}
     )()
-    result = asyncio.run(agent._rewrite_query_for_recall("那个方案后来怎么样了"))
-    assert result == "那个方案后来怎么样了"
+    result = asyncio.run(agent._analyze_query_intent("那个方案后来怎么样了"))
+    assert result == {"is_small_talk": False, "rewritten_query": "那个方案后来怎么样了"}
 
 
-def test_rewrite_skipped_without_rag():
-    """没有 RAG/LLM 时不改写，直接返回原查询"""
+def test_intent_skipped_without_rag():
+    """没有 RAG/LLM 时不做意图分析，直接回退"""
     agent = AgentManager(
         user_id="test_user",
         enable_memory=False,
@@ -95,8 +122,8 @@ def test_rewrite_skipped_without_rag():
         enable_tools=False,
     )
     assert agent.rag_pipeline is None
-    result = asyncio.run(agent._rewrite_query_for_recall("那个方案后来怎么样了"))
-    assert result == "那个方案后来怎么样了"
+    result = asyncio.run(agent._analyze_query_intent("你好"))
+    assert result == {"is_small_talk": False, "rewritten_query": "你好"}
 
 
 if __name__ == "__main__":

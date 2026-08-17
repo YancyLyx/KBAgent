@@ -167,6 +167,9 @@ async def test_chat_empty_result_triggers_fallback(tmp_path, monkeypatch):
     )
     agent.skill_manager = SimpleNamespace(get_intro=lambda: "")
     agent.self_rag_enabled = False
+    # 意图分析/查询增强关闭：本测试聚焦兜底话术，避免额外 LLM 调用干扰计数
+    agent.intent_analysis_enabled = False
+    agent.query_expansion_enabled = False
 
     result = await agent.chat("报销流程是什么")
     assert "未找到相关制度" in result["answer"]

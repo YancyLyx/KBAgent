@@ -98,7 +98,8 @@ def test_agent_loads_loop_config():
         enable_rag=False,
         enable_tools=False,
     )
-    assert agent.max_loop_rounds == 5
+    assert agent.max_loop_rounds == 20
+    assert agent.output_recovery_max == 3
     assert agent.tool_result_max_chars == 3000
     assert agent.tool_result_min_chars == 500
     assert agent.no_progress_threshold >= 1
@@ -108,5 +109,8 @@ def test_agent_loads_loop_config():
     assert agent.llm_tokens["fallback"] == 500
     assert agent.llm_tokens["self_rag_judge"] == 150
     assert agent.llm_tokens["recall_rewrite"] == 100
+    assert agent.llm_tokens["intent_analysis"] == 150
     assert "薪酬绩效" in agent.strict_tags
     assert isinstance(agent.lenient_tags, list)
+    assert agent.query_expansion_enabled is True
+    assert agent.intent_analysis_enabled is True

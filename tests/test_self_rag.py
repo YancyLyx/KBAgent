@@ -232,6 +232,9 @@ async def test_chat_no_progress_detection_integration(tmp_path, monkeypatch):
     agent.skill_manager = SimpleNamespace(get_intro=lambda: "")
     # Self-RAG 关闭：走工具原路径（避免额外 LLM 调用干扰计数）
     agent.self_rag_enabled = False
+    # 意图分析/查询增强关闭：本测试聚焦无进展检测，避免额外 LLM 调用干扰计数
+    agent.intent_analysis_enabled = False
+    agent.query_expansion_enabled = False
 
     result = await agent.chat("差旅报销标准是多少")
     assert result["success"] is True
