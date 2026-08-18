@@ -52,17 +52,28 @@ class RAGPipeline:
         self.vector_store = VectorStore(collection_name, config_path)
         self.retriever = Retriever(self.vector_store, config_path)
         self.reranker = Reranker(config_path)
-        # Autocut 配置：检索策略里默认开关与落差阈值（retrieve 的 autocut 参数
-        # 为 None 时读这里；显式传 True/False 可覆盖）
+        # 重排层增强配置（默认全开，retrieve 参数为 None 时读这里；
+        # 显式传值可覆盖）：
+        # - score_threshold → 阈值过滤（min_rerank_score 默认值）
+        # - autocut / autocut_drop_ratio → 分数悬崖动态截断
+        # - diversity_rerank → MMR 去冗余
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 _cfg = yaml.safe_load(f) or {}
             _retrieval = _cfg.get("retrieval_strategy", {})
             self.autocut_enabled = bool(_retrieval.get("autocut", False))
             self.autocut_drop_ratio = float(_retrieval.get("autocut_drop_ratio", 0.3))
+            self.min_rerank_score_default = float(
+                _retrieval.get("score_threshold", 0.5)
+            )
+            self.diversity_rerank_enabled = bool(
+                _retrieval.get("diversity_rerank", False)
+            )
         except Exception:
             self.autocut_enabled = False
             self.autocut_drop_ratio = 0.3
+            self.min_rerank_score_default = 0.5
+            self.diversity_rerank_enabled = False
 
     def add_documents(self, documents: List[Dict[str, Any]]) -> None:
         """
@@ -84,7 +95,7 @@ class RAGPipeline:
         top_k: int = 3,
         use_rerank: bool = True,
         tag: Optional[str] = None,
-        diversity_rerank: bool = False,
+        diversity_rerank: Optional[bool] = None,
         min_rerank_score: Optional[float] = None,
         autocut: Optional[bool] = None,
     ) -> List[Dict[str, Any]]:
@@ -116,19 +127,30 @@ class RAGPipeline:
         if not use_rerank or not results:
             return results[:top_k]
         
-        # 重排序（在父块级别）
+        # 重排序（在父块级别）：阈值过滤 + Autocut 在精排内部（精排后），
+        # MMR 在精排之后、返回前。三个增强默认从配置读（全开），可显式覆盖
+        threshold = (
+            min_rerank_score
+            if min_rerank_score is not None
+            else getattr(self, "min_rerank_score_default", None)
+        )
+        use_mmr = (
+            diversity_rerank
+            if diversity_rerank is not None
+            else getattr(self, "diversity_rerank_enabled", False)
+        )
         reranked_results = self.reranker.rerank(
             query,
             results,
             top_k=top_k,
-            threshold=min_rerank_score,
+            threshold=threshold,
             autocut=(
                 getattr(self, "autocut_enabled", False)
                 if autocut is None else autocut
             ),
             drop_ratio=getattr(self, "autocut_drop_ratio", 0.3),
         )
-        if diversity_rerank and len(reranked_results) > 1:
+        if use_mmr and len(reranked_results) > 1:
             # MMR 去冗余：相关性 + 多样性平衡，避免 top-k 语义重复
             reranked_results = self._apply_mmr(query, reranked_results, top_k=top_k)
         return reranked_results

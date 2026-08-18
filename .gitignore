@@ -103,4 +103,8 @@ data/missed_queries.jsonl
 .pytest_cache/
 
 doc/interview_prep.md
+doc/rag_retrieval.md
+doc/agent_harness.md
+doc/fallback_eval.md
+doc/todo.md
 .claude/

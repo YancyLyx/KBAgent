@@ -47,9 +47,9 @@ llm_tokens:
   intent_analysis: 150   # LLM 意图分析（闲聊判断 + 指代补全，一次调用）
 
 # Self-RAG：检索后 LLM 判断"片段是否足够回答"，不足则改写查询再检一次
-# 默认关闭：每次检索多一次 LLM 调用，按需开启（Advanced RAG 增强的统一策略）
+# 默认开启：每次检索多一次 LLM 判断调用（RAG 系统成本可接受，换来检索反思）
 self_rag:
-  enabled: false
+  enabled: true
   max_rounds: 1  # 最多补检几次
 
 # 多查询分解 + HyDE 增强检索：拆不拆由 LLM 语义判断（无硬编码关键词）

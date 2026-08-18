@@ -94,12 +94,16 @@ class Reranker:
                 if d["rerank_score"] >= threshold
             ]
 
-        # 分数悬崖动态截断：找最大相对落差处截断（至少保留 1 条）
+        # 分数悬崖动态截断：只在 top_k 范围内找最大相对落差，
+        # 落差 >= drop_ratio 时在断层处截断（返回更少但更干净的候选）。
+        # 注意：必须在 top_k 内找——若在全部候选中找全局最大落差，
+        # top_k 内部的断层可能被更靠后的更大落差掩盖而失效。
         if autocut and len(sorted_docs) > 1:
             scores = [float(d.get("rerank_score", 0.0)) for d in sorted_docs]
             max_drop = 0.0
             cut_idx = None
-            for i in range(1, len(scores)):
+            limit = min(top_k, len(scores))
+            for i in range(1, limit):
                 prev = scores[i - 1]
                 cur = scores[i]
                 if prev <= 0:

@@ -103,7 +103,7 @@ def test_agent_loads_loop_config():
     assert agent.tool_result_max_chars == 3000
     assert agent.tool_result_min_chars == 500
     assert agent.no_progress_threshold >= 1
-    assert isinstance(agent.self_rag_enabled, bool)
+    assert agent.self_rag_enabled is True
     assert agent.llm_tokens["react_loop"] == 1000
     assert agent.llm_tokens["summary"] == 400
     assert agent.llm_tokens["fallback"] == 500
