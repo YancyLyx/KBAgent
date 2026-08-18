@@ -42,6 +42,18 @@ def test_tool_router_call_skill():
     print("✓ test_tool_router_call_skill")
 
 
+def test_real_skill_manager_get_category_reference():
+    """回归：ToolRouter 调用的 get_category_reference 必须在真实 SkillManager
+    上存在（此前只有私有 _read_category_info，read_category_info 工具一直
+    失败被吞，mock 测试没抓到）"""
+    from app.agent.skill_manager import SkillManager
+    sm = SkillManager()
+    assert hasattr(sm, "get_category_reference")
+    # 用真实存在的分类参考验证能读到内容（存在则不触发模板生成）
+    ref = sm.get_category_reference("文献")
+    assert isinstance(ref, str) and len(ref) > 0
+
+
 def test_agent_manager_init_light():
     """AgentManager 初始化（不加载 model）"""
     from app.agent.agent_manager import AgentManager

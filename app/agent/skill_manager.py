@@ -149,6 +149,15 @@ class SkillManager:
             self._generate_reference(tag, ref_path)
         return self._read_md(ref_path)
 
+    def get_category_reference(self, tag: str) -> str:
+        """查看指定分类的详细参考（ToolRouter 调用入口）。
+
+        真实环境验证发现的 bug：ToolRouter 一直调用 get_category_reference，
+        但此前只有私有方法 _read_category_info，read_category_info 工具
+        每次都失败被吞（mock 测试里 MockSkill 有该方法所以没抓到）。
+        """
+        return self._read_category_info(tag)
+
     def _search_knowledge_base(self, query: str, tag: str) -> str:
         """检索知识库"""
         if not self.vector_store:

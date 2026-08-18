@@ -81,6 +81,28 @@ def test_parse_faithfulness():
     assert score2.relevance == 4
 
 
+def test_parse_truncated_json_fallback():
+    """评测输出被 max_tokens 截断（缺右花括号）→ 逐字段提取退化，不整条作废"""
+    raw = ('{"relevance": 5, "completeness": 4, "usefulness": 3, '
+           '"faithfulness": 5, "explanation": "回答直接针对问题，'
+           '但信息可以更完整')
+    score = Evaluator._parse(raw, "q", "a")
+    assert score is not None
+    assert score.relevance == 5
+    assert score.completeness == 4
+    assert score.usefulness == 3
+    assert score.faithfulness == 5
+    assert "回答直接针对问题" in score.explanation
+
+
+def test_parse_json_with_surrounding_text():
+    """JSON 前后混了说明文字 → 花括号子串解析"""
+    raw = '评分结果如下：{"relevance": 4, "completeness": 3, "usefulness": 4, "explanation": "ok"} 完毕'
+    score = Evaluator._parse(raw, "q", "a")
+    assert score is not None
+    assert score.relevance == 4
+
+
 @pytest.mark.asyncio
 async def test_compare_pairwise():
     client, completions = _client_responding(

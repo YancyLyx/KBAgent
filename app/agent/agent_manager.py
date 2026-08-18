@@ -981,6 +981,8 @@ class AgentManager:
                 self.tool_router.call_skill_tool, func_name, func_args
             )
         except Exception as e:
+            # 工具异常要能排查：打印具体错误（否则只回填给 LLM，日志里看不到）
+            print(f"[ToolError] 工具 {func_name} 执行异常: {e}", flush=True)
             return f"工具 {func_name} 执行异常：{e}"
 
     async def _execute_tools(
@@ -1012,10 +1014,14 @@ class AgentManager:
                 return_exceptions=True,
             )
             for (tc_id, _), result in zip(read_tasks, gathered):
-                results[tc_id] = (
-                    result if isinstance(result, str)
-                    else f"工具执行异常：{result}"
-                )
+                if isinstance(result, str):
+                    results[tc_id] = result
+                else:
+                    print(
+                        f"[ToolError] 并行工具协程异常: {result}",
+                        flush=True,
+                    )
+                    results[tc_id] = f"工具执行异常：{result}"
 
         # 写工具串行执行（fail-closed：默认不并行）
         for tc_id, func_name, func_args in write_calls:
@@ -1025,6 +1031,12 @@ class AgentManager:
         failures = sum(
             1 for r in results.values() if r.startswith("工具")
         )
+        if failures:
+            print(
+                f"[ToolError] 本轮工具结果: "
+                f"{[(k, v[:80]) for k, v in results.items()]}",
+                flush=True,
+            )
         return results, failures
 
     # 工具结果压缩上限默认值（实际值以 config/loop_config.yaml 的 budget 段为准；

@@ -24,7 +24,7 @@ AI回答：{answer}
 {faithfulness_section}
 
 输出格式（仅 JSON）：
-{{"relevance": 1-5, "completeness": 1-5, "usefulness": 1-5{faithfulness_field}, "explanation": "..."}}"""
+{{"relevance": 1-5, "completeness": 1-5, "usefulness": 1-5{faithfulness_field}, "explanation": "简要理由（50字内）"}}"""
 
 
 class Evaluator:
@@ -35,7 +35,11 @@ class Evaluator:
         # 优先使用 EVAL_* 专用配置，回退到 DEEPSEEK 主配置
         api_key = os.getenv("EVAL_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
         base_url = os.getenv("EVAL_BASE_URL") or os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-        self.model = os.getenv("EVAL_MODEL") or os.getenv("LLM_MODEL", "deepseek-v4-flash")
+        # 评测模型独立配置；未配置时用非推理默认模型，绝不用 LLM_MODEL 兜底——
+        # 主模型可能是推理模型（deepseek-v4-pro），会把 max_tokens 全花在
+        # reasoning_content 上，正式 content 为空，评测 JSON 永远出不来
+        # （真实环境验证踩到的坑）
+        self.model = os.getenv("EVAL_MODEL") or "deepseek-v4-flash"
         self.client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
@@ -75,9 +79,24 @@ class Evaluator:
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
-                max_tokens=300,
+                # v4 系列模型对长评测 prompt 会进入推理模式，推理 token 占满
+                # 小 max_tokens 时 content 为空（真实环境验证的坑）——给足空间
+                max_tokens=1500,
             )
-            raw = response.choices[0].message.content or ""
+            msg = response.choices[0].message
+            raw = msg.content or ""
+            # 防御：评测模型偶发返回空 content（推理模型会把 token 全花在
+            # reasoning_content 上），提高 max_tokens 重试一次
+            if (
+                not raw.strip()
+            ):
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                    max_tokens=2000,
+                )
+                raw = (response.choices[0].message.content or "").strip()
             return self._parse(raw, query, answer)
         except Exception as e:
             print(f"[Eval] 评分失败: {e}")
@@ -163,5 +182,60 @@ class Evaluator:
                 timestamp="",
             )
         except (json.JSONDecodeError, ValueError, TypeError):
-            print(f"[Eval] 解析失败: {raw[:100]}")
-            return None
+            pass
+
+        # 2) 截取花括号子串再解析（容忍前后混了说明文字）
+        brace_start = raw.find("{")
+        brace_end = raw.rfind("}")
+        if brace_start >= 0 and brace_end > brace_start:
+            try:
+                data = json.loads(raw[brace_start:brace_end + 1])
+                return Evaluator._build_score(data, query, answer)
+            except (json.JSONDecodeError, ValueError, TypeError):
+                pass
+
+        # 3) 逐字段提取（输出被 max_tokens 截断时的退化，坑 11 的修复）
+        def _field_int(key: str) -> Optional[int]:
+            m = re.search(rf'"{key}"\s*:\s*(\d+)', raw)
+            return int(m.group(1)) if m else None
+
+        rel = _field_int("relevance")
+        com = _field_int("completeness")
+        use = _field_int("usefulness")
+        faith = _field_int("faithfulness")
+        # 截断场景下 explanation 可能没有闭合引号，末尾引号设为可选
+        exp_m = re.search(r'"explanation"\s*:\s*"([^"]*)"?', raw)
+        if rel is not None or com is not None or use is not None:
+            return EvalScore(
+                query=query,
+                answer=answer[:200],
+                relevance=rel if rel is not None else 3,
+                completeness=com if com is not None else 3,
+                usefulness=use if use is not None else 3,
+                faithfulness=faith,
+                explanation=(exp_m.group(1) if exp_m else "")[:200],
+                timestamp="",
+            )
+
+        print(f"[Eval] 解析失败: {raw[:100]}")
+        return None
+
+    @staticmethod
+    def _build_score(data: dict, query: str, answer: str) -> EvalScore:
+        """从解析出的 dict 构造 EvalScore（忠实度字段异常不炸整条）"""
+        faithfulness = None
+        if data.get("faithfulness") not in (None, ""):
+            try:
+                faithfulness = int(data["faithfulness"])
+            except (ValueError, TypeError):
+                faithfulness = None
+        return EvalScore(
+            query=query,
+            answer=answer[:200],
+            relevance=int(data.get("relevance", 3)),
+            completeness=int(data.get("completeness", 3)),
+            usefulness=int(data.get("usefulness", 3)),
+            faithfulness=faithfulness,
+            explanation=data.get("explanation", ""),
+            timestamp="",
+        )

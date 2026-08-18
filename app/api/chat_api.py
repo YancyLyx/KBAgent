@@ -79,6 +79,9 @@ class ChatResponse(BaseModel):
     intent: Optional[str] = Field(None, description="识别到的意图")
     tool_used: Optional[str] = Field(None, description="使用的工具")
     context_count: Optional[int] = Field(None, description="检索到的上下文数量")
+    reason: Optional[str] = Field(
+        None, description="循环退出原因（completed/no_progress/max_turns/output_truncated_max/prompt_too_long/cache_hit/error）"
+    )
     session_id: str = Field(..., description="会话ID")
     token: Optional[str] = Field(None, description="服务端签发的匿名身份 token（首次调用返回，客户端需保存并在后续请求的 Authorization 头携带）")
     timestamp: str = Field(..., description="响应时间")
@@ -244,6 +247,7 @@ async def chat(
             intent=result.get("intent"),
             tool_used=result.get("tool_used"),
             context_count=result.get("context_count"),
+            reason=result.get("reason"),
             session_id=session_id,
             token=new_token,
             timestamp=datetime.now().isoformat()
@@ -310,6 +314,7 @@ async def chat_stream(
                         "token": new_token,
                         "tool_used": r.get("tool_used"),
                         "context_count": r.get("context_count"),
+                        "reason": r.get("reason"),
                     }
                     yield f"data: {json.dumps(done_payload, ensure_ascii=False)}\n\n"
                     break
