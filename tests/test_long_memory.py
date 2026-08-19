@@ -110,7 +110,7 @@ def test_summary_keep_recent(memory):
 
     summaries = memory.get_summaries("u_sum", limit=10)
     assert len(summaries) == 3
-    assert summaries[-1]["summary"] == "第4版摘要"  # 保留的是最新 3 行
+    assert summaries[0]["summary"] == "第4版摘要"  # 最新在前，保留最近 3 行
     memory.clear_user_memory("u_sum")
 
 

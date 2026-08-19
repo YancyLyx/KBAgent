@@ -53,6 +53,39 @@ class LongMemory:
 
         # 初始化数据库
         self._init_database()
+        # 演进式摘要迁移到 JSONL（时间线语义，与偏好统一）：
+        # SQLite 历史一次性导出，之后纯文件追加，不再写 conversation_summary
+        self._migrate_summaries_from_sqlite()
+
+    def _migrate_summaries_from_sqlite(self) -> None:
+        """把 SQLite 里的历史摘要按时间顺序迁移到 JSONL（仅首次、文件不存在时）"""
+        try:
+            if not self.enabled:
+                return
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT user_id, summary, key_points, created_at "
+                    "FROM conversation_summary ORDER BY created_at ASC"
+                )
+                rows = [dict(r) for r in cursor.fetchall()]
+            if not rows:
+                return
+            from .summary_store import migrate_from_sqlite
+            by_user: Dict[str, List[Dict]] = {}
+            for r in rows:
+                uid = r.get("user_id") or "default"
+                by_user.setdefault(uid, []).append(r)
+            migrated = 0
+            for uid, user_rows in by_user.items():
+                migrated += migrate_from_sqlite(
+                    uid, user_rows, self.summary_keep_recent
+                )
+            if migrated:
+                print(f"摘要迁移完成：{migrated} 条历史摘要写入 JSONL")
+        except Exception as e:
+            print(f"摘要迁移初始化失败: {e}")
 
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """加载配置文件"""
@@ -484,33 +517,11 @@ class LongMemory:
             print(f"写入画像审计日志失败: {e}")
 
     def add_summary(self, user_id: str, summary: str, key_points: str = "") -> bool:
-        """保存对话摘要（自动清理：每个用户只保留最近 summary_keep_recent 行）"""
+        """保存对话摘要（JSONL 时间线：追加一版，自动清理保留最近 N 行）"""
         if not self.enabled or not user_id:
             return False
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "INSERT INTO conversation_summary (user_id, summary, key_points) VALUES (?, ?, ?)",
-                    (user_id, summary, key_points)
-                )
-                cursor.execute(
-                    """
-                    DELETE FROM conversation_summary
-                    WHERE user_id = ? AND id NOT IN (
-                        SELECT id FROM conversation_summary
-                        WHERE user_id = ?
-                        ORDER BY id DESC
-                        LIMIT ?
-                    )
-                    """,
-                    (user_id, user_id, self.summary_keep_recent),
-                )
-                conn.commit()
-                return True
-        except sqlite3.Error as e:
-            print(f"保存摘要失败: {e}")
-            return False
+        from .summary_store import add_summary
+        return add_summary(user_id, summary, key_points, self.summary_keep_recent)
 
     def get_running_summary(self, user_id: str) -> str:
         """获取最新的对话摘要（演进式，只有一个）"""
@@ -518,21 +529,11 @@ class LongMemory:
         return summaries[0]["summary"] if summaries else ""
 
     def get_summaries(self, user_id: str, limit: int = 3) -> List[Dict[str, Any]]:
-        """获取用户最近的对话摘要"""
+        """获取用户最近的对话摘要（最新在前，JSONL 时间线）"""
         if not self.enabled or not user_id:
             return []
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT summary, key_points, created_at FROM conversation_summary WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
-                    (user_id, limit)
-                )
-                return [dict(r) for r in cursor.fetchall()]
-        except sqlite3.Error as e:
-            print(f"获取摘要失败: {e}")
-            return []
+        from .summary_store import get_summaries
+        return get_summaries(user_id, limit)
 
     def cleanup_expired_memories(self) -> int:
         """
@@ -586,6 +587,9 @@ class LongMemory:
                 )
 
                 conn.commit()
+                # 摘要已迁 JSONL：同步清理时间线文件（管理端"一键清空记忆"）
+                from .summary_store import clear as clear_summaries
+                clear_summaries(user_id)
                 return True
 
         except sqlite3.Error as e:

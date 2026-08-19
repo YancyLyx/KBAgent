@@ -45,6 +45,10 @@ ENV/
 data/chroma_db/
 data/sqlite/*.db
 data/uploaded_docs/
+data/profiles/
+data/testcorpus_eval/
+data/milvus/
+data/crud_rag/
 
 # 模型缓存
 models/
