@@ -7,6 +7,8 @@ openai>=1.0.0
 
 # 向量数据库
 chromadb>=0.4.18
+# Milvus 客户端，钉死 2.5.x 与服务端 2.5.x 配对（官方兼容表），禁止升 3.x
+pymilvus==2.5.4
 
 # Embedding & Rerank 模型
 sentence-transformers>=2.2.2
