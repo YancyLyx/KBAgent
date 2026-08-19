@@ -17,6 +17,8 @@ from rank_bm25 import BM25Okapi
 class VectorStore:
     """向量存储器"""
 
+    backend = "chroma"
+
     def __init__(
         self,
         collection_name: str = "knowledge_base",
@@ -335,3 +337,34 @@ class VectorStore:
             "collection_name": self.collection_name,
             "document_count": count
         }
+
+
+def create_vector_store(
+    collection_name: str = "knowledge_base",
+    config_path: str = "config/rag_config.yaml",
+):
+    """工厂：按配置选择后端。
+
+    config/rag_config.yaml:
+        vector_store:
+          backend: chroma | milvus   # 默认 chroma
+          milvus:
+            uri: http://localhost:19530
+            ...
+
+    返回 VectorStore(Chroma) 或 MilvusVectorStore，二者接口一致。
+    """
+    import yaml as _yaml
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = _yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        cfg = {}
+    backend = (cfg.get("vector_store", {}) or {}).get("backend", "chroma").lower()
+
+    if backend == "milvus":
+        from .milvus_store import MilvusVectorStore
+        return MilvusVectorStore(collection_name, config_path)
+    # 默认 chroma，保持现有行为一字不改
+    return VectorStore(collection_name, config_path)

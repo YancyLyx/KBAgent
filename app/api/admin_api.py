@@ -266,9 +266,9 @@ async def _process_document_indexing(doc_id: str, file_path: Path, file_ext: str
 
         # 同步 Skill 参考文件（新标签自动生成）
         try:
-            from ..rag.vector_store import VectorStore
+            from ..rag.vector_store import create_vector_store
             from ..agent.skill_manager import SkillManager
-            sm = SkillManager(VectorStore())
+            sm = SkillManager(create_vector_store())
             sm.sync_references()
         except Exception:
             pass
@@ -798,8 +798,8 @@ def log_conversation(user_id: str, message: str, intent: str = "unknown", answer
 @router.get("/tags")
 async def get_available_tags(admin: dict = Depends(verify_admin_token)):
     """获取当前知识库中所有已使用的标签"""
-    from ..rag.vector_store import VectorStore
-    store = VectorStore()
+    from ..rag.vector_store import create_vector_store
+    store = create_vector_store()
     return {"tags": store.get_available_tags()}
 
 

@@ -14,7 +14,7 @@ from .chunker import Chunker
 from .pdf_chunker import PDFChunker
 from .markdown_chunker import MarkdownChunker
 from .parent_child_chunker import ParentChildChunker
-from .vector_store import VectorStore
+from .vector_store import VectorStore, create_vector_store
 from .retriever import Retriever
 from .reranker import Reranker
 
@@ -49,7 +49,7 @@ class RAGPipeline:
         
         # 初始化 RAG 组件
         self.chunker = Chunker(config_path)
-        self.vector_store = VectorStore(collection_name, config_path)
+        self.vector_store = create_vector_store(collection_name, config_path)
         self.retriever = Retriever(self.vector_store, config_path)
         self.reranker = Reranker(config_path)
         # 重排层增强配置（默认全开，retrieve 参数为 None 时读这里；

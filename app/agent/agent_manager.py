@@ -22,7 +22,7 @@ from enum import Enum
 from pathlib import Path
 
 from ..rag.rag_pipeline import RAGPipeline
-from ..rag.vector_store import VectorStore
+from ..rag.vector_store import VectorStore, create_vector_store
 from ..memory.short_memory import ShortMemory
 from ..memory.long_memory import LongMemory
 from ..cache.query_cache import get_shared_cache
@@ -80,7 +80,7 @@ class AgentManager:
 
         # 初始化各模块
         self.rag_pipeline = RAGPipeline() if enable_rag else None
-        self.vector_store = VectorStore() if enable_rag else None
+        self.vector_store = create_vector_store() if enable_rag else None
         self.skill_manager = SkillManager(self.vector_store) if enable_rag else None
 
         self.tool_router = ToolRouter() if enable_tools else None

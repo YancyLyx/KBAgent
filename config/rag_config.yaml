@@ -1,5 +1,15 @@
 # RAG 配置文件
 
+# 向量存储后端：chroma（默认，本地 PersistentClient）| milvus（Standalone，内置 BM25+RRF）
+vector_store:
+  backend: chroma
+  milvus:
+    uri: http://localhost:19530
+    collection: knowledge_base
+    default_partition: kb_default
+    consistency: Bounded
+    dim: 512
+
 chunk_strategy:
   chunk_size: 1000
   chunk_overlap: 100

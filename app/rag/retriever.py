@@ -81,7 +81,12 @@ class Retriever:
         """
         if top_k is None:
             top_k = self.retrieval_config.get("rerank_top_k", 3)
-        
+
+        # Milvus 后端：单次调用 Milvus 内置 RRFRanker，跳过手写 RRF（严禁二次 RRF）
+        if getattr(self.vector_store, "backend", "chroma") == "milvus":
+            return self.vector_store.hybrid_search(query, top_k=top_k, filters=filters)
+
+        # Chroma 后端：手写 RRF（k=60），逻辑保持不变
         # 向量检索
         vector_results = self.vector_search(query, top_k=top_k * 2, filters=filters)
         # BM25 关键词检索
