@@ -361,10 +361,16 @@ def create_vector_store(
             cfg = _yaml.safe_load(f) or {}
     except FileNotFoundError:
         cfg = {}
-    backend = (cfg.get("vector_store", {}) or {}).get("backend", "chroma").lower()
+    # 后端选择：环境变量 VECTOR_STORE_BACKEND 优先于配置，默认 chroma
+    # 产品路径（无 env）行为不变；评测/脚本通过 env 切换后端
+    backend = os.getenv("VECTOR_STORE_BACKEND", "").lower()
+    if not backend:
+        backend = (cfg.get("vector_store", {}) or {}).get("backend", "chroma").lower()
 
     if backend == "milvus":
         from .milvus_store import MilvusVectorStore
+        # 集合名可通过环境变量覆盖（评测用 crud_rag），默认用传入值
+        collection_name = os.getenv("E2E_COLLECTION", collection_name)
         return MilvusVectorStore(collection_name, config_path)
     # 默认 chroma，保持现有行为一字不改
     return VectorStore(collection_name, config_path)

@@ -57,6 +57,7 @@ class MilvusVectorStore:
         self,
         collection_name: str = "knowledge_base",
         config_path: str = "config/rag_config.yaml",
+        partition: Optional[str] = None,
     ):
         self.config = self._load_config(config_path)
         self.collection_name = collection_name
@@ -64,7 +65,9 @@ class MilvusVectorStore:
         vs_cfg = self.config.get("vector_store", {}) or {}
         milvus_cfg = vs_cfg.get("milvus", {}) or {}
         self.uri = os.getenv("MILVUS_URI", milvus_cfg.get("uri", "http://localhost:19530"))
-        self.default_partition = milvus_cfg.get("default_partition", "kb_default")
+        # partition 支持按 collection 覆盖：构造参数 > 配置默认值
+        # 不同语料用不同 partition 隔离（如 crud_rag 用 crud_news）
+        self.default_partition = partition or milvus_cfg.get("default_partition", "kb_default")
         self.consistency = milvus_cfg.get("consistency", "Bounded")
         self.dim = int(milvus_cfg.get("dim", 512))
 

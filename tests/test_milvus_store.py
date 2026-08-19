@@ -218,3 +218,25 @@ def test_retriever_parent_child_milvus():
             s.delete_collection()
         except Exception:
             pass
+
+
+def test_create_vector_store_env_override(monkeypatch):
+    """VECTOR_STORE_BACKEND 环境变量优先于 config；默认 chroma 产品路径不变。"""
+    from app.rag.vector_store import VectorStore, create_vector_store
+
+    # 默认（无 env）：返回 Chroma VectorStore，产品路径不变
+    monkeypatch.delenv("VECTOR_STORE_BACKEND", raising=False)
+    monkeypatch.delenv("E2E_COLLECTION", raising=False)
+    vs = create_vector_store(collection_name="kb_env_test")
+    assert vs.backend == "chroma"
+    assert isinstance(vs, VectorStore)
+
+    # env=milvus：返回 MilvusVectorStore（Milvus 不可达时由 pytestmark skip）
+    monkeypatch.setenv("VECTOR_STORE_BACKEND", "milvus")
+    monkeypatch.setenv("E2E_COLLECTION", "crud_rag")
+    from app.rag.milvus_store import MilvusVectorStore
+
+    vs2 = create_vector_store(collection_name="kb_ignored")
+    assert vs2.backend == "milvus"
+    assert isinstance(vs2, MilvusVectorStore)
+    assert vs2.collection_name == "crud_rag"  # E2E_COLLECTION 覆盖生效
