@@ -25,6 +25,14 @@ def _client_responding(content):
     return SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
 
 
+class _FakeReranker:
+    def rerank(self, query, docs, top_k=3, threshold=None, autocut=False, drop_ratio=0.3):
+        out = list(docs)
+        for i, d in enumerate(out):
+            d.setdefault("rerank_score", 1.0 - i * 0.1)
+        return out[:top_k]
+
+
 def _agent_with_retrieve(retrieve_fn):
     agent = AgentManager(
         user_id="u",
@@ -33,7 +41,7 @@ def _agent_with_retrieve(retrieve_fn):
         enable_tools=False,
     )
     agent.rag_pipeline = SimpleNamespace(
-        llm_client=_client_responding(""), llm_model="m"
+        llm_client=_client_responding(""), llm_model="m", reranker=_FakeReranker()
     )
     agent.tool_router = SimpleNamespace(
         skill_pipeline=SimpleNamespace(retrieve=retrieve_fn)

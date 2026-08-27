@@ -55,6 +55,16 @@ async def test_hyde():
     assert await generate_hypothetical_doc(_client_failing(), "m", "q") is None
 
 
+class _FakeReranker:
+    """模拟 CrossEncoder 精排：保持传入顺序、补 rerank_score（合并仲裁用）"""
+
+    def rerank(self, query, docs, top_k=3, threshold=None, autocut=False, drop_ratio=0.3):
+        out = list(docs)
+        for i, d in enumerate(out):
+            d.setdefault("rerank_score", 1.0 - i * 0.1)
+        return out[:top_k]
+
+
 def _agent_with_retrieve(retrieve_fn, llm_content='["子问题A", "子问题B"]'):
     agent = AgentManager(
         user_id="u",
@@ -66,6 +76,7 @@ def _agent_with_retrieve(retrieve_fn, llm_content='["子问题A", "子问题B"]'
         llm_client=_client_responding(llm_content),
         llm_model="m",
         retrieve=retrieve_fn,
+        reranker=_FakeReranker(),
     )
     return agent
 
@@ -78,6 +89,7 @@ async def test_search_with_expansion_merges():
         return []
 
     agent = _agent_with_retrieve(fake_retrieve)
+    agent.query_expansion_enabled = True  # 显式开启：本用例测合并逻辑，默认配置是关
     result = await agent._search_with_expansion(
         {"query": "差旅和餐补分别怎么规定", "tag": "差旅报销"}
     )

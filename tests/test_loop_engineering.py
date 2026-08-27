@@ -112,5 +112,5 @@ def test_agent_loads_loop_config():
     assert agent.llm_tokens["intent_analysis"] == 150
     assert "薪酬绩效" in agent.strict_tags
     assert isinstance(agent.lenient_tags, list)
-    assert agent.query_expansion_enabled is True
+    assert agent.query_expansion_enabled is False  # 2026-08-27 三档评测后默认关
     assert agent.intent_analysis_enabled is True

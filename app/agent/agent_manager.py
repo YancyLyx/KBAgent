@@ -1227,26 +1227,40 @@ class AgentManager:
             if not rewritten or rewritten == query:
                 return first
 
-            # 补检：最多 self_rag_max_rounds 次，每次用改写查询再检并按内容去重合并
+            # 补检：最多 self_rag_max_rounds 次，每次用改写查询再检；
+            # 多路结果用 RRF 融合（result_merger），不再"先到先得"丢信息
+            from ..rag.result_merger import rrf_merge
+            rounds = [contexts]
             seen = {c.get("content", "")[:80] for c in contexts}
-            merged = list(contexts)
             for _ in range(max(self.self_rag_max_rounds, 1)):
                 contexts2 = await asyncio.to_thread(
                     pipeline.retrieve, rewritten, 3, True, tag
                 )
                 if not contexts2:
                     break
-                added = False
-                for c in contexts2:
-                    key = c.get("content", "")[:80]
-                    if key and key not in seen:
-                        merged.append(c)
-                        seen.add(key)
-                        added = True
-                if not added:
+                new_keys = {
+                    c.get("content", "")[:80] for c in contexts2
+                } - seen
+                if not new_keys:
                     # 补检未带来新信息：即使配置允许多次，也不做无意义重复
                     break
-            return self._format_search_result(query, tag, merged[:3])
+                seen |= new_keys
+                rounds.append(contexts2)
+            merged = rrf_merge(rounds, top_k=12)
+            # 与多查询合并一致的仲裁：原 query 精排
+            merged = self.rag_pipeline.reranker.rerank(
+                query,
+                merged,
+                top_k=3,
+                threshold=getattr(
+                    self.rag_pipeline, "min_rerank_score_default", None
+                ),
+                autocut=getattr(self.rag_pipeline, "autocut_enabled", False),
+                drop_ratio=getattr(
+                    self.rag_pipeline, "autocut_drop_ratio", 0.3
+                ),
+            )
+            return self._format_search_result(query, tag, merged)
         except Exception:
             return None
 
@@ -1323,26 +1337,44 @@ class AgentManager:
             if hyde:
                 candidates.append(hyde)
 
-            merged: Dict[str, Dict] = {}
-            # 多路检索并行：子查询彼此独立、检索全为只读（Chroma/BM25/精排），
-            # asyncio.gather 并发执行，任一失败不影响其他路
+            from ..rag.result_merger import rrf_merge
+            # 每路候选放大（candidate_top_k，默认 9）再融合：给每篇文档浮上来的
+            # 机会；RRF 按排名累加（rerank 分数跨 query 不可直接比）。
+            # 多路检索并行：子查询彼此独立、检索全为只读，任一失败不影响其他路
+            candidate_k = int(
+                self.loop_config.get("query_expansion", {})
+                .get("candidate_top_k", 9)
+            )
             gathered = await asyncio.gather(
                 *(
                     asyncio.to_thread(
-                        self.rag_pipeline.retrieve, q, 3, True, tag
+                        self.rag_pipeline.retrieve, q, candidate_k, True, tag
                     )
                     for q in candidates
                 ),
                 return_exceptions=True,
             )
-            for ctxs in gathered:
-                if not isinstance(ctxs, list):
-                    continue
-                for ctx in ctxs:
-                    key = ctx.get("content", "")
-                    if key and key not in merged:
-                        merged[key] = ctx
-            results = list(merged.values())[:3]
+            merged = rrf_merge(
+                [ctxs for ctxs in gathered if isinstance(ctxs, list)],
+                top_k=12,  # 粗融合留足候选（相关文档可能只在某条子查询排 5-9 名），原 query 精排仲裁
+            )
+            if not merged:
+                return None
+            # 原 query 精排仲裁：RRF 会奖励"多条子查询都命中的泛化文档"，
+            # 把真正相关项挤下去（3docs 诊断实证）；原问题的相关性最可信，
+            # 用它对融合结果重排一次，阈值/Autocut 沿用管线配置
+            results = self.rag_pipeline.reranker.rerank(
+                query,
+                merged,
+                top_k=3,
+                threshold=getattr(
+                    self.rag_pipeline, "min_rerank_score_default", None
+                ),
+                autocut=getattr(self.rag_pipeline, "autocut_enabled", False),
+                drop_ratio=getattr(
+                    self.rag_pipeline, "autocut_drop_ratio", 0.3
+                ),
+            )
             if not results:
                 return None
 

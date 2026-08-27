@@ -54,7 +54,9 @@ self_rag:
 
 # 多查询分解 + HyDE 增强检索：拆不拆由 LLM 语义判断（无硬编码关键词）
 query_expansion:
-  enabled: true
+  enabled: false  # 2026-08-27 三档评测实证：分解+HyDE 在检索指标上全面负收益（R@10 全降）
+  # 演进（todo）：LLM 判断"明确多主题且互不重叠"才启用的类型化开关
+  candidate_top_k: 9  # 多路检索每路候选放大数：子查询各取 top-9 再 RRF 融合（诊断驱动）
 
 # LLM 意图分析：是否闲聊（注入路由）+ 指代补全（记忆召回），一次调用完成
 intent_analysis:
