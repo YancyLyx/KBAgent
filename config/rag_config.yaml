@@ -2,7 +2,9 @@
 
 # 向量存储后端：chroma（默认，本地 PersistentClient）| milvus（Standalone，内置 BM25+RRF）
 vector_store:
-  backend: chroma
+  # 2026-08-27 产品默认切 Milvus（制度库 172 chunks 已迁移，规模选型结论见
+  # rag_retrieval.md「规模化落地」；Chroma 保留可切回：VECTOR_STORE_BACKEND=chroma）
+  backend: milvus
   milvus:
     uri: http://localhost:19530
     collection: knowledge_base

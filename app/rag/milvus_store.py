@@ -193,12 +193,13 @@ class MilvusVectorStore:
             texts = [c.get("content", "") for c in batch]
             embeddings = self.encode_text(texts)
             rows = []
-            for c, emb in zip(batch, embeddings):
+            for j, (c, emb) in enumerate(zip(batch, embeddings)):
                 ct = c.get("content_types", [])
                 ct_str = ",".join(ct) if isinstance(ct, list) else str(ct)
                 rows.append(
                     {
-                        "chunk_id": c.get("chunk_id", f"chunk_{i}"),
+                        # 回退 id 必须唯一：同批内用 i+j，否则 upsert 互相覆盖只剩一条
+                        "chunk_id": c.get("chunk_id", f"chunk_{i + j}"),
                         "text": c.get("content", ""),
                         "dense": emb,
                         "tag": c.get("tag", ""),
