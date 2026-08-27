@@ -150,6 +150,22 @@ class RAGPipeline:
             ),
             drop_ratio=getattr(self, "autocut_drop_ratio", 0.3),
         )
+        # 图像块豁免阈值：VLM 结构化描述是列表式文本，bge-reranker 打分失真
+        # （实测"2023年销售额是多少"vs 图表描述 0.001，vs 手写句 0.99），
+        # 而检索层（hybrid）已能召回；把被阈值/截断滤掉的 image 块按 rerank
+        # 顺序补回，避免图片问答被精排误杀
+        if any(c.get("doc_type") == "image" for c in results):
+            # 即使阈值把所有候选滤光（reranked_results 为空），图片块也要兜底返回，
+            # 否则图片问答整条链路被精排误杀（"销售额/柱状图"查询实测为 0 条）
+            present = {c.get("content", "") for c in reranked_results}
+            for c in results:
+                if c.get("doc_type") == "image" and c.get("content", "") not in present:
+                    reranked_results.append(c)
+            reranked_results = sorted(
+                reranked_results,
+                key=lambda x: x.get("rerank_score", 0.0),
+                reverse=True,
+            )[:top_k]
         if use_mmr and len(reranked_results) > 1:
             # MMR 去冗余：相关性 + 多样性平衡，避免 top-k 语义重复
             reranked_results = self._apply_mmr(query, reranked_results, top_k=top_k)
@@ -263,7 +279,7 @@ class RAGPipeline:
     ) -> None:
         """添加文件到知识库（自动识别文件类型并进行父子分块）
 
-        支持 PDF / Markdown / 纯文本。
+        支持 PDF / Markdown / DOCX / 图片(png/jpg/webp/bmp，VLM 描述) / 纯文本。
         流程：语义级分块（按章节）→ 父子分块（子块索引 → 父块返回给 LLM）。
 
         Args:
@@ -284,6 +300,14 @@ class RAGPipeline:
         elif ext == ".md":
             chunker = MarkdownChunker(self.config_path)
             parents = chunker.chunk_md(file_path, metadata=meta)
+        elif ext == ".docx":
+            from .docx_chunker import DocxChunker
+            chunker = DocxChunker(self.config_path)
+            parents = chunker.chunk_docx(file_path, metadata=meta)
+        elif ext in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+            from .image_chunker import ImageChunker
+            chunker = ImageChunker(self.config_path)
+            parents = chunker.chunk_image(file_path, metadata=meta)
         else:
             # txt / 无后缀 → 走原本文本分块
             with open(file_path, "r", encoding="utf-8") as f:

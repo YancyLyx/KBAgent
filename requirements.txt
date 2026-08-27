@@ -41,3 +41,6 @@ PyMuPDF>=1.23.0
 
 # BM25 关键词检索
 rank-bm25>=0.2.2
+
+# DOCX 解析
+python-docx>=1.1.0

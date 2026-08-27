@@ -172,6 +172,7 @@ class Retriever:
                     "page_range": meta.get("page_range", ""),
                     "content_types": meta.get("content_types", ""),
                     "source": meta.get("source", ""),
+                    "doc_type": meta.get("doc_type", ""),
                     "search_type": "parent_child",
                 }
 

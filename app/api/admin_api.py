@@ -177,7 +177,7 @@ async def upload_document(
     支持格式: .txt, .md, .pdf, .docx
     """
     # 验证文件类型
-    allowed_extensions = {'.txt', '.md', '.pdf', '.docx'}
+    allowed_extensions = {'.txt', '.md', '.pdf', '.docx', '.png', '.jpg', '.jpeg', '.webp', '.bmp'}
     file_ext = Path(file.filename).suffix.lower()
 
     if file_ext not in allowed_extensions:

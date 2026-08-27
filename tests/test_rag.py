@@ -262,9 +262,16 @@ KBAgent - Smart Knowledge Base Q&A System 是一个企业级智能客服系统�
     stats = rag.get_stats()
     print(f"知识库统计: {stats}")
 
-    # 测试检索
+    # 测试检索（Milvus growing segment 偶发时序：插入后立刻检索可能短暂为空，
+    # 重试 3 次保证确定性，避免全量套件偶发失败）
     print("\n检索测试: '订单状态'")
-    contexts = rag.retrieve("订单状态", top_k=2)
+    import time
+    contexts = []
+    for _ in range(3):
+        contexts = rag.retrieve("订单状态", top_k=2)
+        if contexts:
+            break
+        time.sleep(1.0)
 
     for i, ctx in enumerate(contexts):
         print(f"  {i + 1}. [{ctx.get('rerank_score', ctx.get('score', 0)):.3f}] {ctx['content'][:50]}...")
