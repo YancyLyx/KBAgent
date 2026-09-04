@@ -24,7 +24,7 @@ def _fake_png(tmp_path):
 def test_image_chunk_described(tmp_path, monkeypatch):
     path = _fake_png(tmp_path)
     chunker = ImageChunker()
-    monkeypatch.setattr(chunker, "_describe", lambda p: "柱状图：2023 Q3 销售额 120 万，同比 +15%")
+    monkeypatch.setattr(chunker, "_describe", lambda p, caption="", source="": "柱状图：2023 Q3 销售额 120 万，同比 +15%")
     chunks = chunker.chunk_image(str(path), metadata={"source": "chart.png", "tag": "图表"})
     assert chunks
     c = chunks[0]
@@ -32,6 +32,25 @@ def test_image_chunk_described(tmp_path, monkeypatch):
     assert "image" in c.get("content_types", [])
     assert c.get("source") == "chart.png"
     assert c.get("tag") == "图表"
+
+
+def test_image_chunk_passes_caption(tmp_path, monkeypatch):
+    """图注/标题应传入 _describe 作为主题上下文"""
+    path = _fake_png(tmp_path)
+    chunker = ImageChunker()
+    captured = {}
+
+    def fake_describe(p, caption="", source=""):
+        captured["caption"] = caption
+        captured["source"] = source
+        return "销售趋势图描述"
+
+    monkeypatch.setattr(chunker, "_describe", fake_describe)
+    chunks = chunker.chunk_image(str(path), metadata={
+        "source": "季度销售额趋势.png", "title": "季度销售额（万元）柱状图", "tag": "图表"})
+    assert captured["caption"] == "季度销售额（万元）柱状图"
+    assert captured["source"] == "季度销售额趋势.png"
+    assert chunks and "销售趋势图描述" in chunks[0]["content"]
 
 
 def test_image_chunk_failure_placeholder(tmp_path, monkeypatch):

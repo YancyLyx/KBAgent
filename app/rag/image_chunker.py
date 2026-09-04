@@ -47,7 +47,7 @@ class ImageChunker:
         self.config_path = config_path
         self.model = os.getenv("VISION_MODEL", DEFAULT_VISION_MODEL)
 
-    def _describe(self, image_path: str) -> str:
+    def _describe(self, image_path: str, caption: str = "", source: str = "") -> str:
         ext = Path(image_path).suffix.lower().lstrip(".")
         if ext == "jpg":
             ext = "jpeg"
@@ -55,12 +55,22 @@ class ImageChunker:
             b64 = base64.b64encode(f.read()).decode("utf-8")
         data_url = f"data:image/{ext};base64,{b64}"
         client = _vision_client()
+        # 图注/文件名提供主题上下文（v1.1：图表标题常说明纵轴含义，如"销售额"），
+        # 但明确约束：只作理解辅助，图中看不到的具体数值不许编造
+        context = ""
+        if source or caption:
+            context = "图片上下文："
+            if source:
+                context += f"来自文件「{source}」"
+            if caption:
+                context += f"，附带说明「{caption}」"
+            context += "。说明与文件名仅用于理解图表主题，不要编造图中没有的具体数值。\n\n"
         resp = client.chat.completions.create(
             model=self.model,
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": VISION_PROMPT},
+                    {"type": "text", "text": context + VISION_PROMPT},
                     {"type": "image_url", "image_url": {"url": data_url}},
                 ],
             }],
@@ -81,8 +91,10 @@ class ImageChunker:
     ) -> List[Dict[str, Any]]:
         if metadata is None:
             metadata = {}
+        caption = metadata.get("caption") or metadata.get("title") or ""
+        source = metadata.get("source", "")
         try:
-            description = self._describe(image_path)
+            description = self._describe(image_path, caption=caption, source=source)
         except Exception as e:  # VLM 失败不静默：占位文本 + 可排查
             description = (
                 f"[图片 {os.path.basename(image_path)} 描述失败：{type(e).__name__}: {e}]"
