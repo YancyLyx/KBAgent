@@ -58,6 +58,12 @@ query_expansion:
   # 演进（todo）：LLM 判断"明确多主题且互不重叠"才启用的类型化开关
   candidate_top_k: 9  # 多路检索每路候选放大数：子查询各取 top-9 再 RRF 融合（诊断驱动）
 
+# HyDE 检索失败抢救（与多查询分解解耦）：
+# 默认不跑主路径；仅当常规检索返回"未找到"（空结果）时，生成假设文档补检一次。
+# 命中带标记返回，避免直接进 missed 链。触发率/命中率待真实数据统计（todo）。
+hyde_rescue:
+  enabled: true
+
 # LLM 意图分析：是否闲聊（注入路由）+ 指代补全（记忆召回），一次调用完成
 intent_analysis:
   enabled: true

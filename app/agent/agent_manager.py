@@ -133,6 +133,10 @@ class AgentManager:
         self.query_expansion_enabled = bool(
             self.loop_config.get("query_expansion", {}).get("enabled", True)
         )
+        # HyDE 检索失败抢救：仅空结果时触发（见 _handle_missed_retrieval 第 0 步）
+        self.hyde_rescue_enabled = bool(
+            self.loop_config.get("hyde_rescue", {}).get("enabled", True)
+        )
         self.intent_analysis_enabled = bool(
             self.loop_config.get("intent_analysis", {}).get("enabled", True)
         )
@@ -1128,6 +1132,31 @@ class AgentManager:
         3. 生成层：按场景标签回填话术——strict 明确拒绝编造，
            lenient 允许通用知识兜底但必须标注来源。
         """
+        # 0) HyDE 抢救（检索失败抢救，2026-09-04）：空结果 + 启用地 →
+        #    生成假设文档补检一次，命中带标记返回，避免进 missed 链。
+        #    与多查询分解解耦（后者默认关）；仅空结果时花一次 LLM 调用。
+        if self.hyde_rescue_enabled and self.rag_pipeline is not None:
+            try:
+                from ..rag.query_expansion import generate_hypothetical_doc
+                llm_client = getattr(self.rag_pipeline, "llm_client", None)
+                llm_model = getattr(self.rag_pipeline, "llm_model", "")
+                if llm_client:
+                    hypo = await generate_hypothetical_doc(llm_client, llm_model, query)
+                    if hypo and hypo.strip() and hypo.strip() != query:
+                        pipeline = (
+                            getattr(self.tool_router, "skill_pipeline", None)
+                            or self.rag_pipeline
+                        )
+                        rescued = await asyncio.to_thread(
+                            pipeline.retrieve, hypo, 3, True, tag
+                        )
+                        rescued = [c for c in rescued if c.get("content")]
+                        if rescued:
+                            result = self._format_search_result(query, tag, rescued)
+                            return result + "\n（HyDE 补检命中）"
+            except Exception:
+                pass  # 抢救失败不阻塞 missed 链，如实走原兜底
+
         # 1) 失败 query 日志（系统层闭环）
         try:
             from ..eval.missed_queries import record_missed
