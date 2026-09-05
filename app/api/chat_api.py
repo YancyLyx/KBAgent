@@ -70,6 +70,10 @@ class ChatRequest(BaseModel):
     message: str = Field(..., description="用户消息", min_length=1, max_length=2000)
     session_id: Optional[str] = Field(None, description="会话ID（用于保持上下文）")
     context: Optional[dict] = Field(None, description="额外上下文信息")
+    image_base64: Optional[str] = Field(
+        None,
+        description="用户附图（data URL 或纯 base64）。上传后用 VLM 描述并并入本轮用户消息",
+    )
 
 
 class ChatResponse(BaseModel):
@@ -204,6 +208,68 @@ async def health_check():
     )
 
 
+@app.get("/api/auth/anonymous")
+async def anonymous_auth():
+    """签发匿名身份 token：用户端首次进入即可取身份，偏好/聊天共用。
+    （避免"必须先聊一次天才能拿到 token"才解锁偏好的先有鸡还是先有蛋）"""
+    uid = issue_anonymous_user_id()
+    return {"user_id": uid, "token": issue_token(uid)}
+
+
+# ==================== 用户附图（VLM 描述）====================
+
+def _describe_image_base64(b64: str) -> Optional[str]:
+    """同步调用 deepseek-vision-exp 描述图片（图片理解在聊天链路中即时完成）。
+    失败返回 None：聊天照常进行，只是不并入图片描述（不静默编造内容）。"""
+    try:
+        import base64 as _b64
+        import re as _re
+        from openai import OpenAI
+        data_url = None
+        if b64.startswith("data:"):
+            # 保留原始 data URL（含真实 mime 类型，JPEG 不要标成 png）
+            m = _re.match(r"data:image/[a-zA-Z0-9.+-]+;base64,(.*)$", b64, _re.S)
+            if not m:
+                return None
+            data_url, payload = b64, m.group(1)
+        else:
+            payload = b64
+        _b64.b64decode(payload, validate=True)  # 校验合法性
+        client = OpenAI(
+            api_key=os.getenv("DEEPSEEK_API_KEY"),
+            base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+        )
+        resp = client.chat.completions.create(
+            model=os.getenv("VISION_MODEL", "deepseek-v4-flash-vision-exp"),
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "请描述这张图片的内容，供智能问答参考：先一句话概括；"
+                     "若为图表/流程图/表格请给出结构化要点；只描述图中确实存在的内容，不要编造。"},
+                    {"type": "image_url", "image_url": {"url": data_url or f"data:image/png;base64,{payload}"}},
+                ],
+            }],
+            temperature=0.2,
+            max_tokens=2000,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        return text or None
+    except Exception:
+        return None
+
+
+async def _prepare_agent_message(request: ChatRequest) -> str:
+    """有附图时：VLM 描述后并入用户消息给 Agent（历史里仍存原文）。"""
+    if not request.image_base64:
+        return request.message
+    desc = await asyncio.to_thread(_describe_image_base64, request.image_base64)
+    if not desc:
+        return request.message
+    base = request.message.strip()
+    note = f"用户上传了一张图片，图片内容：{desc}"
+    return f"{base}\n\n[{note}]" if base else note
+
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(
     request: ChatRequest,
@@ -218,13 +284,14 @@ async def chat(
         # 会话解析（身份签发 + 归属校验）与 /chat/stream 共用
         session_id, user_id, agent, new_token = _resolve_session(request, authorization)
 
-        # 持久化用户消息
+        # 持久化用户消息（原文；附图由 VLM 描述后并入 agent_message，历史不存 base64）
         SessionStore.add_message(session_id, "user", request.message)
+        agent_message = await _prepare_agent_message(request)
 
         # Agent 已整体异步化：LLM 用 AsyncOpenAI（网络等待不占线程），
         # embedding/rerank 在内部丢线程池，这里直接 await 即可
         result = await agent.chat(
-            request.message,
+            agent_message,
             request.context or {},
         )
 
@@ -273,6 +340,7 @@ async def chat_stream(
     try:
         session_id, user_id, agent, new_token = _resolve_session(request, authorization)
         SessionStore.add_message(session_id, "user", request.message)
+        agent_message = await _prepare_agent_message(request)
         queue: "asyncio.Queue" = asyncio.Queue()
 
         async def on_token(token: str) -> None:
@@ -282,7 +350,7 @@ async def chat_stream(
             """后台跑完整 Agent 链路（含记忆/评测/缓存等后置），结束后推 done/error"""
             try:
                 result = await agent.chat(
-                    request.message,
+                    agent_message,
                     request.context or {},
                     stream_callback=on_token,
                 )

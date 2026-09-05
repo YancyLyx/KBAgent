@@ -43,7 +43,7 @@ const Chat: React.FC = () => {
   useEffect(() => {
     loadSessions().then((sessions) => {
       // 尝试从localStorage恢复当前会话
-      const savedSessionId = localStorage.getItem('smartsupport_current_session_id');
+      const savedSessionId = localStorage.getItem('kbagent_current_session_id');
       if (savedSessionId) {
         // 检查该会话是否仍然存在
         const sessionExists = sessions.some((s) => s.id === savedSessionId);
@@ -51,7 +51,7 @@ const Chat: React.FC = () => {
           handleSelectSession(savedSessionId);
         } else {
           // 会话已被删除，清除localStorage
-          localStorage.removeItem('smartsupport_current_session_id');
+          localStorage.removeItem('kbagent_current_session_id');
         }
       }
     });
@@ -67,14 +67,14 @@ const Chat: React.FC = () => {
     };
     setSessions((prev) => [newSession, ...prev]);
     setCurrentSessionId(newSessionId);
-    localStorage.setItem('smartsupport_current_session_id', newSessionId);
+    localStorage.setItem('kbagent_current_session_id', newSessionId);
     setMessages([]);
   };
 
   // 选择会话
   const handleSelectSession = async (id: string) => {
     setCurrentSessionId(id);
-    localStorage.setItem('smartsupport_current_session_id', id);
+    localStorage.setItem('kbagent_current_session_id', id);
     setMessages([]);
 
     try {
@@ -112,7 +112,7 @@ const Chat: React.FC = () => {
       if (currentSessionId === id) {
         setCurrentSessionId(undefined);
         setMessages([]);
-        localStorage.removeItem('smartsupport_current_session_id');
+        localStorage.removeItem('kbagent_current_session_id');
       }
 
       antMessage.success('会话已删除');
@@ -121,20 +121,21 @@ const Chat: React.FC = () => {
     }
   };
 
-  // 发送消息
-  const handleSendMessage = async (content: string) => {
+  // 发送消息（可选附图）
+  const handleSendMessage = async (content: string, imageBase64?: string) => {
     // 没有当前会话时先创建一个
     let sessionId = currentSessionId;
     if (!sessionId) {
       const newSessionId = `sess_${generateId()}`;
+      const title = (imageBase64 ? '[图片] ' : '') + content;
       const newSession: Session = {
         id: newSessionId,
-        title: content.slice(0, 20) + (content.length > 20 ? '...' : ''),
+        title: title.slice(0, 20) + (title.length > 20 ? '...' : ''),
         timestamp: new Date().toISOString(),
       };
       setSessions((prev) => [newSession, ...prev]);
       setCurrentSessionId(newSessionId);
-      localStorage.setItem('smartsupport_current_session_id', newSessionId);
+      localStorage.setItem('kbagent_current_session_id', newSessionId);
       sessionId = newSessionId;
     }
 
@@ -173,7 +174,7 @@ const Chat: React.FC = () => {
 
     // 优先流式；流式失败时 fallback 到非流式接口
     chatApi.sendMessageStream(
-      { message: content, session_id: sessionId },
+      { message: content, session_id: sessionId, image_base64: imageBase64 },
       {
         onToken: (t) => {
           streamed += t;
@@ -192,6 +193,7 @@ const Chat: React.FC = () => {
             const resp = await chatApi.sendMessage({
               message: content,
               session_id: sessionId,
+              image_base64: imageBase64,
             });
             if (resp.token) {
               setToken(resp.token);
@@ -253,6 +255,10 @@ const Chat: React.FC = () => {
     }
   };
 
+  // 时间线里剔除当前生效项，剩下的就是"已被修改/删除"的历史（可回溯）
+  const activePrefIds = new Set(prefsActive.map((item: any) => item.id));
+  const prefsHistory = prefsTimeline.filter((item: any) => !activePrefIds.has(item.id));
+
   return (
     <div className={styles.chatPage}>
       <Sidebar
@@ -264,7 +270,7 @@ const Chat: React.FC = () => {
       />
       <div className={styles.chatContainer}>
         <div className={styles.chatHeader}>
-          <h2>SmartSupport AI 智能客服</h2>
+          <h2>KBAgent 智能知识库问答</h2>
           <Button size="small" onClick={() => { loadPrefs(); setPrefsOpen(true); }}>
             我的偏好
           </Button>
@@ -305,6 +311,25 @@ const Chat: React.FC = () => {
               </List.Item>
             )}
           />
+          {prefsHistory.length > 0 && (
+            <>
+              <div style={{ marginTop: 8, color: '#999', fontSize: 13 }}>
+                历史（已被修改/删除的旧偏好）
+              </div>
+              <List
+                size="small"
+                bordered
+                dataSource={prefsHistory}
+                renderItem={(item: any) => (
+                  <List.Item>
+                    <Text type="secondary">
+                      （{String(item.updated_at).slice(0, 10)}）{item.text}
+                    </Text>
+                  </List.Item>
+                )}
+              />
+            </>
+          )}
         </Space>
       </Modal>
     </div>

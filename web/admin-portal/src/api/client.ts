@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-const ADMIN_TOKEN_KEY = 'smartsupport_admin_token';
+const ADMIN_TOKEN_KEY = 'kbagent_admin_token';
 
 export const getAdminToken = (): string | null =>
   localStorage.getItem(ADMIN_TOKEN_KEY);

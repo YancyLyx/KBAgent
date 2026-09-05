@@ -119,7 +119,7 @@ token 里带一个过期时间戳（exp），服务端验签时检查"当前时�
   }
   （token = 服务端生成的 user_id + HMAC 签名）
 
-第 3 步：前端把 token 存进 localStorage（key: smartsupport_token）
+第 3 步：前端把 token 存进 localStorage（key: kbagent_token）
 
 第 4 步：后续所有请求自动带上
   Authorization: Bearer user_8969a39e1546.b97997ea2ee6a85f8e1a78d22cb183e4...
@@ -151,7 +151,7 @@ token 里带一个过期时间戳（exp），服务端验签时检查"当前时�
   }
   失败 → 401 {"detail": "用户名或密码错误"}
 
-第 3 步：前端把 token 存进 localStorage（key: smartsupport_admin_token）
+第 3 步：前端把 token 存进 localStorage（key: kbagent_admin_token）
 
 第 4 步：后续管理请求自动带上
   Authorization: Bearer admin.1799999999.9f86d081884c7d659a2f...

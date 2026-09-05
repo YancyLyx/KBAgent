@@ -56,7 +56,7 @@ const Sidebar: React.FC<SidebarProps> = ({
       <div className={styles.header}>
         <div className={styles.logo}>
           <RobotOutlined className={styles.logoIcon} />
-          <span className={styles.logoText}>SmartSupport</span>
+          <span className={styles.logoText}>KBAgent</span>
         </div>
         <Button
           type="primary"

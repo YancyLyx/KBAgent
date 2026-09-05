@@ -40,7 +40,7 @@ const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
       <Card style={{ width: 360 }}>
         <div style={{ textAlign: 'center', marginBottom: 24 }}>
           <Title level={3} style={{ marginBottom: 4 }}>
-            SmartSupport AI
+            KBAgent
           </Title>
           <Text type="secondary">管理后台登录</Text>
         </div>

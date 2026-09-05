@@ -64,7 +64,7 @@ const App: React.FC = () => {
     <Layout style={{ minHeight: '100vh' }}>
       <Sider collapsible collapsed={collapsed} onCollapse={onCollapse}>
         <div style={{ height: 64, margin: 16, background: 'rgba(255,255,255,0.1)', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', fontSize: collapsed ? 14 : 18, fontWeight: 'bold' }}>
-          {collapsed ? 'SS' : 'SmartSupport'}
+          {collapsed ? 'KB' : 'KBAgent'}
         </div>
         <Menu
           theme="dark"
@@ -78,7 +78,7 @@ const App: React.FC = () => {
       <Layout>
         <Header style={{ padding: 0, background: colorBgContainer }} >
           <div style={{ padding: '0 24px', fontSize: 18, fontWeight: 'bold' }}>
-            SmartSupport AI 管理后台
+            KBAgent 管理后台
           </div>
         </Header>
 

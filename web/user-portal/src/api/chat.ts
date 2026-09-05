@@ -1,4 +1,4 @@
-import client, { API_BASE_URL, getToken, setToken } from './client';
+import client, { API_BASE_URL, ensureToken, getToken, setToken } from './client';
 
 export interface ChatMessage {
   role: 'user' | 'assistant';
@@ -11,6 +11,7 @@ export interface ChatRequest {
   message: string;
   session_id?: string;
   context?: Record<string, any>;
+  image_base64?: string; // 附图（data URL）；后端 VLM 描述后并入消息
 }
 
 export interface ChatResponse {
@@ -54,10 +55,12 @@ export const chatApi = {
   },
 
   // 用户偏好 CRUD（JSONL 文件存储）
-  getPreferences: (): Promise<{ timeline: any[]; active: any[] }> => {
+  async getPreferences(): Promise<{ timeline: any[]; active: any[] }> {
+    await ensureToken();
     return client.get('/api/profile/preferences');
   },
-  addPreference: (text: string): Promise<{ message: string; entry: any }> => {
+  async addPreference(text: string): Promise<{ message: string; entry: any }> {
+    await ensureToken();
     return client.post('/api/profile/preferences', { text });
   },
   updatePreference: (id: string, text: string): Promise<{ message: string }> => {

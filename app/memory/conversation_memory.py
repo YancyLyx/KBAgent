@@ -7,34 +7,58 @@
 
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+import os
 import uuid
+
+import chromadb
+from chromadb.config import Settings
+
+
+# 对话记忆专用 Chroma 客户端（模块级共享，避免同进程多 PersistentClient 冲突）。
+# 注意：对话记忆是"语义回忆用向量库"，**独立于知识库后端**——知识库默认已切
+# Milvus 后，这里仍走 Chroma（迁移踩坑：早期直接复用 vector_store.client，
+# 切 Milvus 后 client 变 MilvusClient，create_collection(name=...) 是 Chroma
+# 签名 → 500，chat 拿不到 token）。
+_chroma_client = None
+
+
+def _memory_chroma() -> chromadb.ClientAPI:
+    global _chroma_client
+    if _chroma_client is None:
+        db_path = os.getenv("CHROMA_DB_PATH", "./data/chroma_db")
+        _chroma_client = chromadb.PersistentClient(
+            path=db_path,
+            # 与 VectorStore 完全一致的 settings，避免 SharedSystemClient 冲突
+            settings=Settings(anonymized_telemetry=False, allow_reset=True),
+        )
+    return _chroma_client
 
 
 class ConversationMemory:
     """会话记忆
 
-    使用 ChromaDB 存储对话历史，支持：
+    使用 ChromaDB 存储对话历史（与知识库后端解耦），支持：
     - 按 session_id 精准检索历史
     - 按用户跨会话语义回忆（Semantic Recall）
     """
 
     def __init__(self, vector_store):
         self.vector_store = vector_store
-        self.client = vector_store.client
+        # 只复用 vector_store 的 embedding 编码与集合命名，client 用独立 Chroma
+        self.client = _memory_chroma()
         self.collection = self._get_or_create_collection()
         self._turn_counter: Dict[str, int] = {}
 
     def _get_or_create_collection(self):
-        """获取或创建对话历史集合"""
+        """获取或创建对话历史集合（Chroma）"""
         collection_name = f"{self.vector_store.collection_name}_conversations"
         try:
-            col = self.client.get_collection(name=collection_name)
+            return self.client.get_collection(name=collection_name)
         except Exception:
-            col = self.client.create_collection(
+            return self.client.create_collection(
                 name=collection_name,
                 metadata={"hnsw:space": "cosine"},
             )
-        return col
 
     # ------------------------------------------------------------------
     # 写
