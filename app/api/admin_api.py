@@ -641,6 +641,24 @@ async def delete_user_memory_fact(
     return {"message": f"已删除偏好条目：{body.text}", "user_id": user_id}
 
 
+@router.delete("/memory/{user_id}/prefs/{pref_id}")
+async def delete_user_pref(
+    user_id: str,
+    pref_id: str,
+    admin: dict = Depends(verify_admin_token),
+):
+    """删除用户在前端「我的偏好」手动添加的偏好（软删除，时间线保留）"""
+    from ..memory import pref_store
+
+    ok = pref_store.delete_pref(user_id, pref_id)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="未找到该偏好条目或已删除",
+        )
+    return {"message": f"已删除偏好条目：{pref_id}", "user_id": user_id}
+
+
 @router.delete("/memory/{user_id}")
 async def clear_user_memory_api(
     user_id: str,

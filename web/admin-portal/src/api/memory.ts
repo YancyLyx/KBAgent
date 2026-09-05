@@ -6,9 +6,18 @@ export interface MemoryFact {
   source?: string;
 }
 
+export interface PrefEntry {
+  id: string;
+  text: string;
+  updated_at?: string;
+  source?: string;
+  status?: string;
+}
+
 export interface UserMemory {
   user_id: string;
   profile: {
+    topics?: any[];
     company?: string | null;
     contact_email?: string | null;
     preferences?: {
@@ -17,6 +26,8 @@ export interface UserMemory {
   };
   running_summary: string;
   audit_md: string;
+  prefs_timeline?: PrefEntry[];
+  prefs_active?: PrefEntry[];
 }
 
 export const memoryApi = {
@@ -25,11 +36,18 @@ export const memoryApi = {
     return (await client.get(`/api/admin/memory/${userId}`)) as UserMemory;
   },
 
-  // 删除单条偏好（人工纠错）
+  // 删除单条偏好（人工纠错；自动提取画像）
   deleteFact: async (userId: string, text: string): Promise<{ message: string }> => {
     return (await client.delete(`/api/admin/memory/${userId}/facts`, {
       data: { text },
     })) as { message: string };
+  },
+
+  // 删除单条手动偏好（前端「我的偏好」添加，按 pref_id 软删除）
+  deleteManualPref: async (userId: string, prefId: string): Promise<{ message: string }> => {
+    return (await client.delete(
+      `/api/admin/memory/${userId}/prefs/${prefId}`,
+    )) as { message: string };
   },
 
   // 清空用户记忆
