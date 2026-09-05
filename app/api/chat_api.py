@@ -16,6 +16,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..agent.agent_manager import AgentManager
+from ..rag.rag_pipeline import RAGPipeline
 from .admin_api import router as admin_router, log_conversation
 from ..db.session_store import SessionStore
 from .anon_auth import (
@@ -126,6 +127,20 @@ def _resolve_user_id(authorization: Optional[str], issue_if_missing: bool = Fals
     new_uid = issue_anonymous_user_id()
     return new_uid, issue_token(new_uid)
 
+# 共享 RAG 基础设施（进程级单例）：embedding/rerank 模型与 LLM client 都是
+# 重量级且无会话状态的资源。每个新会话都新建会导致 ~20s 模型加载延迟，
+# 改为整个进程只初始化一次，Agent 会话只复用实例（记忆等会话态仍按 agent 隔离）。
+_shared_rag_pipeline = None
+_shared_vector_store = None
+
+
+def _get_shared_rag_infra():
+    global _shared_rag_pipeline, _shared_vector_store
+    if _shared_rag_pipeline is None:
+        _shared_rag_pipeline = RAGPipeline()
+        _shared_vector_store = _shared_rag_pipeline.vector_store
+    return _shared_rag_pipeline, _shared_vector_store
+
 
 def _resolve_session(request: "ChatRequest", authorization: Optional[str]):
     """会话解析公共逻辑：身份签发/校验 + 会话创建/归属校验。
@@ -142,12 +157,15 @@ def _resolve_session(request: "ChatRequest", authorization: Optional[str]):
             raise HTTPException(status_code=403, detail="该会话不属于当前用户")
         agent = session_info["agent"]
     else:
+        shared_pipeline, shared_store = _get_shared_rag_infra()
         agent = AgentManager(
             user_id=user_id,
             enable_memory=True,
             enable_rag=True,
             enable_tools=True,
             enable_eval=True,
+            rag_pipeline=shared_pipeline,
+            vector_store=shared_store,
         )
         _active_sessions[session_id] = {
             "agent": agent,
@@ -645,6 +663,13 @@ async def startup_event():
     print("=" * 50)
     print(f"文档地址: http://127.0.0.1:8000/docs")
     print(f"健康检查: http://127.0.0.1:8000/health")
+    # 预热共享 RAG 模型（embedding/rerank）：把一次性加载成本从"用户首条消息"
+    # 移到启动阶段，避免第一个用户等 ~15s 才开始流式
+    try:
+        _get_shared_rag_infra()
+        print("共享 RAG 模型预热完成（embedding + rerank，进程内只加载一次）")
+    except Exception as e:
+        print(f"共享 RAG 预热失败（将退化为首次请求时加载）: {e}")
     print("=" * 50)
 
 

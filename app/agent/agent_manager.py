@@ -46,9 +46,13 @@ class AgentManager:
     - 渐进披露：先 read_category_info 了解详情，再 search_knowledge_base 检索
     """
 
-    SYSTEM_PROMPT_TPL = """你是一个企业级智能知识库问答助手。请用中文回答，保持简洁专业。
+    SYSTEM_PROMPT_TPL = """你是一个智能知识库问答助手（KBAgent）。请用中文回答，保持简洁专业。
 
 {skill_intro}
+
+开场定位：
+- 用户问候（你好/Hi 等）或询问你能做什么时，不要罗列内部知识库分类清单，直接这样开场：
+  我是智能知识库问答助手，可以帮你查询知识库已有的内容，也可以通过后台上传你的知识库。请问有什么可以帮你？你可以直接描述你的问题，例如“小龙虾的做法”（示例固定用这个，不要替换成别的例子）。
 
 工作流程：
 1. 如果用户问题需要检索知识库，请使用 read_category_info 了解各知识库内容范围
@@ -69,6 +73,8 @@ class AgentManager:
         enable_rag: bool = True,
         enable_tools: bool = True,
         enable_eval: bool = False,
+        rag_pipeline: Optional["RAGPipeline"] = None,
+        vector_store: Optional["VectorStore"] = None,
     ):
         self.user_id = user_id
         self.enable_memory = enable_memory
@@ -78,9 +84,20 @@ class AgentManager:
         # 语义缓存（进程级共享：不同会话复用同一份，避免每个实例一个空缓存）
         self.query_cache = get_shared_cache()
 
-        # 初始化各模块
-        self.rag_pipeline = RAGPipeline() if enable_rag else None
-        self.vector_store = create_vector_store() if enable_rag else None
+        # 初始化各模块：embedding/rerank/LLM client 是重量级且无会话状态的资源，
+        # 默认由调用方（chat_api）注入进程级共享实例，避免每个新会话都从磁盘
+        # 重新加载模型（实测会让新会话首字延迟到 ~20s）。测试等直接构造时
+        # 未传共享实例，保持原有"各自初始化"行为不变。
+        if enable_rag:
+            if rag_pipeline is None:
+                rag_pipeline = RAGPipeline()
+            if vector_store is None:
+                vector_store = rag_pipeline.vector_store
+            self.rag_pipeline = rag_pipeline
+            self.vector_store = vector_store
+        else:
+            self.rag_pipeline = None
+            self.vector_store = None
         self.skill_manager = SkillManager(self.vector_store) if enable_rag else None
 
         self.tool_router = ToolRouter() if enable_tools else None
@@ -317,24 +334,25 @@ class AgentManager:
         user_context = ""
         if self.long_memory and self.user_id:
             try:
-                # 注入路由：LLM 意图分析判定为闲聊时，不注入用户画像/演进式摘要
-                # （省 token，也避免闲聊被记忆带偏）；知识/业务类问题才注入
+                # 偏好始终注入：用户可能在任何一轮问「你记得我的偏好吗」；
+                # 偏好只有 ≤10 条且是短文本，token 成本可忽略。演进式摘要仍只在
+                # 业务/知识类问题注入（闲聊时省 token，也避免被摘要带偏）。
+                from ..memory.pref_store import get_active
+                prefs = get_active(self.user_id, limit=10)
+                if prefs:
+                    pref_lines = [
+                        f"- {p['updated_at'][:10]}: {p['text']}"
+                        for p in prefs if p.get("text")
+                    ]
+                    if pref_lines:
+                        user_context = "## 用户偏好历史（按时间）\n" + "\n".join(pref_lines)
+                        user_context += (
+                            "\n\n执行规则：偏好中关于格式/语言/示例/风格的要求要在回答中落实；"
+                            "若用户询问是否记得其偏好，请基于以上历史明确回答记住了哪些偏好，"
+                            "不要声称没有跨会话记忆；若偏好历史存在矛盾或模糊，"
+                            "先向用户澄清再回答，或说明按哪个偏好处理。"
+                        )
                 if not is_small_talk:
-                    # 偏好时间线注入：当前生效偏好（完整历史经状态过滤），
-                    # 交 LLM 综合判断矛盾，发现矛盾先澄清再回答
-                    from ..memory.pref_store import get_active
-                    prefs = get_active(self.user_id, limit=10)
-                    if prefs:
-                        pref_lines = [
-                            f"- {p['updated_at'][:10]}: {p['text']}"
-                            for p in prefs if p.get("text")
-                        ]
-                        if pref_lines:
-                            user_context = "## 用户偏好历史（按时间）\n" + "\n".join(pref_lines)
-                            user_context += (
-                                "\n（若偏好历史存在矛盾或模糊，先向用户澄清再回答，"
-                                "或说明按哪个偏好处理）"
-                            )
                     running_summary = self.long_memory.get_running_summary(self.user_id)
                     if running_summary:
                         if user_context:

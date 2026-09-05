@@ -14,6 +14,22 @@ import styles from './Chat.module.css';
 const generateId = () => Math.random().toString(36).substring(2, 9);
 
 const Chat: React.FC = () => {
+  // 升级兼容：上一版把身份/会话 key 存为 smartsupport_*，本项目统一改名为
+  // kbagent_* 后要迁移旧 key，否则刷新页面会被当作"新匿名用户"，
+  // 看不到历史会话与偏好（服务端 SQLite 里的会话仍在，只是客户端身份丢了）。
+  useEffect(() => {
+    const legacyToken = localStorage.getItem('smartsupport_token');
+    if (legacyToken && !localStorage.getItem('kbagent_token')) {
+      localStorage.setItem('kbagent_token', legacyToken);
+    }
+    localStorage.removeItem('smartsupport_token');
+    const legacySid = localStorage.getItem('smartsupport_current_session_id');
+    if (legacySid && !localStorage.getItem('kbagent_current_session_id')) {
+      localStorage.setItem('kbagent_current_session_id', legacySid);
+    }
+    localStorage.removeItem('smartsupport_current_session_id');
+  }, []);
+
   const [sessions, setSessions] = useState<Session[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string>();
   const [messages, setMessages] = useState<Message[]>([]);

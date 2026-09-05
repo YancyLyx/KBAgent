@@ -2,9 +2,19 @@ import axios from 'axios';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const ADMIN_TOKEN_KEY = 'kbagent_admin_token';
+const LEGACY_ADMIN_TOKEN_KEY = 'smartsupport_admin_token'; // 升级兼容
 
-export const getAdminToken = (): string | null =>
-  localStorage.getItem(ADMIN_TOKEN_KEY);
+export const getAdminToken = (): string | null => {
+  let token = localStorage.getItem(ADMIN_TOKEN_KEY);
+  if (!token) {
+    token = localStorage.getItem(LEGACY_ADMIN_TOKEN_KEY);
+    if (token) {
+      localStorage.setItem(ADMIN_TOKEN_KEY, token);
+      localStorage.removeItem(LEGACY_ADMIN_TOKEN_KEY);
+    }
+  }
+  return token;
+};
 export const setAdminToken = (token: string): void => {
   localStorage.setItem(ADMIN_TOKEN_KEY, token);
 };

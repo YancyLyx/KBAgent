@@ -2,8 +2,21 @@ import axios from 'axios';
 
 export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const TOKEN_KEY = 'kbagent_token';
+const LEGACY_TOKEN_KEY = 'smartsupport_token'; // 升级兼容：旧 key 迁到新 key，避免身份/历史丢失
 
-export const getToken = (): string | null => localStorage.getItem(TOKEN_KEY);
+export const getToken = (): string | null => {
+  let token = localStorage.getItem(TOKEN_KEY);
+  if (!token) {
+    // 上一版前端用 smartsupport_token；改名后要把旧身份迁移过来，
+    // 否则用户会变成"新匿名用户"，看不到原会话与偏好
+    token = localStorage.getItem(LEGACY_TOKEN_KEY);
+    if (token) {
+      localStorage.setItem(TOKEN_KEY, token);
+      localStorage.removeItem(LEGACY_TOKEN_KEY);
+    }
+  }
+  return token;
+};
 export const setToken = (token: string): void => {
   localStorage.setItem(TOKEN_KEY, token);
 };
